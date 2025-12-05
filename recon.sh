@@ -1,20 +1,5 @@
 #!/usr/bin/env bash
 
-#  /$$                           /$$$$$$     /$$$$$$$  /$$                                                            
-# | $$                         /$$$__  $$$  | $$__  $$|__/                                                            
-# | $$$$$$$  /$$   /$$        /$$_/  \_  $$ | $$  \ $$ /$$  /$$$$$$   /$$$$$$$  /$$$$$$   /$$$$$$   /$$$$$$   /$$$$$$ 
-# | $$__  $$| $$  | $$       /$$/ /$$$$$  $$| $$  | $$| $$ /$$__  $$ /$$_____/ /$$__  $$ /$$__  $$ /$$__  $$ /$$__  $$
-# | $$  \ $$| $$  | $$      | $$ /$$  $$| $$| $$  | $$| $$| $$  \__/|  $$$$$$ | $$  \ $$| $$  \ $$| $$  \ $$| $$  \ $$
-# | $$  | $$| $$  | $$      | $$| $$\ $$| $$| $$  | $$| $$| $$       \____  $$| $$  | $$| $$  | $$| $$  | $$| $$  | $$
-# | $$$$$$$/|  $$$$$$$      | $$|  $$$$$$$$/| $$$$$$$/| $$| $$       /$$$$$$$/|  $$$$$$/|  $$$$$$/|  $$$$$$/|  $$$$$$/
-# |_______/  \____  $$      |  $$\________/ |_______/ |__/|__/      |_______/  \______/  \______/  \______/  \______/ 
-#            /$$  | $$       \  $$$   /$$$                                                                            
-#           |  $$$$$$/        \_  $$$$$$_/                                                                            
-#            \______/           \______/                                                                                                 
-
-# +-+-+-+-+-+-+
-# |A|r|r|a|y|s|
-# +-+-+-+-+-+-+
 
 open_redir_parameters=(
 	'?next='
@@ -101,24 +86,6 @@ lfi_parameters=(
 	'?conf='
 
 )
-
-printBanner() {
-	printf "\n\033[1;32m"
-	printf "\t██▀███  ▓█████  ▄████▄   ▒█████   ███▄    █ \n"
-	printf "\t▓██ ▒ ██▒▓█   ▀ ▒██▀ ▀█  ▒██▒  ██▒ ██ ▀█   █\n" 
-	printf "\t▓██ ░▄█ ▒▒███   ▒▓█    ▄ ▒██░  ██▒▓██  ▀█ ██▒\n"
-	printf "\t▒██▀▀█▄  ▒▓█  ▄ ▒▓▓▄ ▄██▒▒██   ██░▓██▒  ▐▌██▒\n"
-	printf "\t░██▓ ▒██▒░▒████▒▒ ▓███▀ ░░ ████▓▒░▒██░   ▓██░\n"
-	printf "\t░ ▒▓ ░▒▓░░░ ▒░ ░░ ░▒ ▒  ░░ ▒░▒░▒░ ░ ▒░   ▒ ▒ \n"
-	printf "\t░▒ ░ ▒░ ░ ░  ░  ░  ▒     ░ ▒ ▒░ ░ ░░   ░ ▒░\n"
-	printf "\t░░   ░    ░   ░        ░ ░ ░ ▒     ░   ░ ░ \n"
-	printf "\t░        ░  ░░ ░          ░ ░           ░ \n"
-	printf "\t░\n"                                                             
-	printf "\t\t Crafted with <3 by Dirso \033[33mv1.0\n\n"	
-	printf "\033[1;35m\tBased on The Bug Hunters Methodology v4.0.2 By @Jhaddix\n"	
-    	printf "\t    and recon of recon, tips and tricks by @ofjaaah\n"
-	printf "\033[m\n"
-}
 
 
 show_help() {
@@ -268,8 +235,8 @@ subdomainEnumeration() {
 			assetfinder $target | tee -a $output_folder/subdomains.txt || $GOPATH/bin/assetfinder $target | tee -a $output_folder/subdomains.txt
 			echo -e "\n\033[36m>>>\033[35m Running subfinder 🔍\033[m"
 			subfinder --silent -d $target | tee -a $output_folder/subdomains.txt || $GOPATH/bin/subfinder --silent -d $target | tee -a $output_folder/subdomains.txt
-			echo -e "\n\033[36m>>>\033[35m Running amass 🔍\033[m"
-			amass enum --passive -d $target | tee -a $output_folder/subdomains.txt || $GOPATH/bin/amass enum --passive -d $target | tee -a $output_folder/subdomains.txt
+			#echo -e "\n\033[36m>>>\033[35m Running amass 🔍\033[m"
+			#amass enum --passive -d $target | tee -a $output_folder/subdomains.txt || $GOPATH/bin/amass enum --passive -d $target | tee -a $output_folder/subdomains.txt
 			echo -e "\n\033[36m>>>\033[35m Getting Subdomains from RapidDNS.io 🔍\033[m"
 			curl -s "https://rapiddns.io/subdomain/$target?full=1#result" | grep "<td><a" | cut -d '"' -f 2 | grep http | cut -d '/' -f3 | sed 's/#results//g' | sort -u | tee -a $output_folder/subdomains.txt
 			echo -e "\n\033[36m>>>\033[35m Getting Subdomains from Riddler.io 🔍\033[m"
@@ -284,7 +251,7 @@ subdomainEnumeration() {
 			sublist3r -d $target -o $SCRIPTPATH/sublist3r-$domain.txt
 			cat $SCRIPTPATH/sublist3r-$domain.txt >> $output_folder/subdomains.txt
 			rm $SCRIPTPATH/sublist3r-$domain.txt
-			knockpy $target -w $wordlist -o $output_folder/knockpy/ -t 5
+			knockpy $target --wordlist $wordlist --save $output_folder/knockpy/ --threads 5
 			if [ "$GHAPIKEY" != "False" ]; then
 				echo -e "\n\033[36m>>>\033[35m Running Github-Subdomains 🔍\033[m"
 				python3 $SCRIPTPATH/tools/github-search/github-subdomains.py -t $GHAPIKEY -d $target | tee -a $output_folder/subdomains.txt
@@ -301,9 +268,9 @@ subdomainEnumeration() {
 			echo -e -n "\033[36m>>>\033[35m Running subfinder 🔍\033[m"
 			subfinder --silent -d $target >> $output_folder/subdomains.txt || $GOPATH/bin/subfinder --silent -d $target >> $output_folder/subdomains.txt
 			echo " ✅"
-			echo -e -n "\033[36m>>>\033[35m Running amass 🔍\033[m"
-			amass enum --passive -d $target >> $output_folder/subdomains.txt || $GOPATH/bin/amass enum --passive -d $target >> $output_folder/subdomains.txt
-			echo " ✅"
+			#echo -e -n "\033[36m>>>\033[35m Running amass 🔍\033[m"
+			#amass enum --passive -d $target >> $output_folder/subdomains.txt || $GOPATH/bin/amass enum --passive -d $target >> $output_folder/subdomains.txt
+			#echo " ✅"
 			echo -e -n "\033[36m>>>\033[35m Getting Subdomains from RapidDNS.io 🔍\033[m"
 			curl -s "https://rapiddns.io/subdomain/$target?full=1#result" | grep "<td><a" | cut -d '"' -f 2 | grep http | cut -d '/' -f3 | sed 's/#results//g' | sort -u >> $output_folder/subdomains.txt
 			echo " ✅"
@@ -749,35 +716,43 @@ portscan() {
 
 
 linkDiscovery() {
-	alive_domains="$1"
-	output_folder="$2"
-	if [ "$(cat $alive_domains | wc -l)" -ge "1" ]; then
-		if [ "$QUIET" != "True" ]; then
-			printf "\n\033[1;32m"
-			printf "\t░█░░░▀█▀░█▀█░█░█░░░█▀▄░▀█▀░█▀▀░█▀▀░█▀█░█░█░█▀▀░█▀▄░█░█\n"
-			printf "\t░█░░░░█░░█░█░█▀▄░░░█░█░░█░░▀▀█░█░░░█░█░▀▄▀░█▀▀░█▀▄░░█░\n"
-			printf "\t░▀▀▀░▀▀▀░▀░▀░▀░▀░░░▀▀░░▀▀▀░▀▀▀░▀▀▀░▀▀▀░░▀░░▀▀▀░▀░▀░░▀░\n"
-			printf "\033[m\n"
-		else
-			echo -e -n "\n\033[1;36m[+] Link Discovery 🔎\033[m"
-		fi
-		[[ ! -d $output_folder ]] && mkdir $output_folder
-		[[ ! -d $output_folder/hakrawler ]] && mkdir $output_folder/hakrawler 2>/dev/null
-		[[ ! -d $output_folder/waybackurls ]] && mkdir $output_folder/waybackurls 2>/dev/null
-		for d in $(cat $alive_domains); do
-			dnohttps="$(echo $d| cut -d "/" -f3-)"
-			hakrawler --nocolor -all --url $d >> $output_folder/hakrawler/$dnohttps.txt
-			echo $d | waybackurls >> $output_folder/waybackurls/$dnohttps.txt
-		done
-		cat $output_folder/hakrawler/*.txt | cut -d "]" -f2- | sed -e 's/^[ \t]*//' >> $output_folder/all.txt
-		cat $output_folder/waybackurls/*.txt | sed -e 's/^[ \t]*//' >> $output_folder/all.txt
-		sort -u $output_folder/all.txt -o $output_folder/all.txt
-		if [ "$QUIET" == "True" ]; then
-			echo " ✅"
-		fi
-		all="$(cat $output_folder/all.txt | wc -l)"
-		echo -e "\033[35m[+] Found \033[31m$all\033[35m links\033[m"
-	fi
+    alive_domains="$1"
+    output_folder="$2"
+
+    # Verifica se o arquivo tem conteúdo
+    if [ "$(cat "$alive_domains" | wc -l)" -ge "1" ]; then
+        if [ "$QUIET" != "True" ]; then
+            printf "\n\033[1;32m"
+            printf "\t░█░░░▀█▀░█▀█░█░█░░░█▀▄░▀█▀░█▀▀░█▀▀░█▀█░█░█░█▀▀░█▀▄░█░█\n"
+            printf "\t░█░░░░█░░█░█░█▀▄░░░█░█░░█░░▀▀█░█░░░█░█░▀▄▀░█▀▀░█▀▄░░█░\n"
+            printf "\t░▀▀▀░▀▀▀░▀░▀░▀░▀░░░▀▀░░▀▀▀░▀▀▀░▀▀▀░▀▀▀░░▀░░▀▀▀░▀░▀░░▀░\n"
+            printf "\033[m\n"
+        else
+            echo -e -n "\n\033[1;36m[+] Link Discovery 🔎\033[m"
+        fi
+
+        [[ ! -d "$output_folder" ]] && mkdir "$output_folder"
+        [[ ! -d "$output_folder/hakrawler" ]] && mkdir "$output_folder/hakrawler" 2>/dev/null
+        [[ ! -d "$output_folder/waybackurls" ]] && mkdir "$output_folder/waybackurls" 2>/dev/null
+
+        for d in $(cat "$alive_domains"); do
+            dnohttps="$(echo $d | cut -d "/" -f3-)"
+            echo "$d" | hakrawler -subs >> "$output_folder/hakrawler/$dnohttps.txt"
+            echo "$d" | waybackurls >> "$output_folder/waybackurls/$dnohttps.txt"
+        done
+
+        cat "$output_folder/hakrawler/"*.txt | cut -d "]" -f2- | sed -e 's/^[ \t]*//' >> "$output_folder/all.txt"
+        cat "$output_folder/waybackurls/"*.txt | sed -e 's/^[ \t]*//' >> "$output_folder/all.txt"
+        
+        sort -u "$output_folder/all.txt" -o "$output_folder/all.txt"
+
+        if [ "$QUIET" == "True" ]; then
+            echo " ✅"
+        fi
+
+        all="$(cat "$output_folder/all.txt" | wc -l)"
+        echo -e "\033[35m[+] Found \033[31m$all\033[35m links\033[m"
+    fi
 }
 
 
@@ -796,10 +771,10 @@ endpointsEnumeration() {
 		fi
 		if [ "$QUIET" != "True" ]; then
 			echo -e "\n\033[36m>>>\033[35m Extracting URLs 🔍\033[m"
-			xargs -a $alive_domains -I@ bash -c "python3 $SCRIPTPATH/tools/ParamSpider/paramspider.py -d @ -l high"
+			xargs -a $alive_domains -I@ bash -c "paramspider -d @ "
 		else
 			echo -e -n "\n\033[36m>>>\033[35m Extracting URLs 🔍\033[m"
-			xargs -a $alive_domains -I@ bash -c "python3 $SCRIPTPATH/tools/ParamSpider/paramspider.py -d @ -l high" > $SCRIPTPATH/paramspidertemp
+			xargs -a $alive_domains -I@ bash -c "paramspider -d @ " > $SCRIPTPATH/paramspidertemp
 			rm $SCRIPTPATH/paramspidertemp
 			echo " ✅"
 		fi
@@ -948,7 +923,6 @@ findVuln() {
 
 
 if [ "$1" == "--help" ] || [ "$1" == "-h" ]; then
-	printBanner
 	show_help
 	exit
 fi
@@ -996,8 +970,6 @@ if [ "$OUTFOLDER" == "" ]; then
 fi
 DOMAINS="$OUTFOLDER/subdomains/subdomains.txt"
 dep_falt=0
-
-printBanner
 
 echo -e "\033[36m[!] Checking dependencies\033[m"
 if [ ! -e $SCRIPTPATH/requirements.txt ]; then
@@ -1111,7 +1083,7 @@ dnsLookup $DOMAINS $OUTFOLDER
 # |W|a|f| |D|e|t|e|c|t|i|o|n|
 # +-+-+-+ +-+-+-+-+-+-+-+-+-+
 
-wafDetect $OUTFOLDER/subdomains/alive.txt
+#wafDetect $OUTFOLDER/subdomains/alive.txt
 
 # +-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+
 # |F|a|v|i|c|o|n| |A|n|a|l|y|s|i|s|
@@ -1123,7 +1095,7 @@ favAnalysis $OUTFOLDER/subdomains/alive.txt $OUTFOLDER/favicon-analysis
 # |D|i|r|e|c|t|o|r|y| |F|u|z|z|i|n|g|
 # +-+-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+
 
-dirFuzz $OUTFOLDER/subdomains/alive.txt $OUTFOLDER/fuzz
+#dirFuzz $OUTFOLDER/subdomains/alive.txt $OUTFOLDER/fuzz
 
 # +-+-+-+-+ +-+-+-+-+-+
 # |C|r|e|d| |S|t|u|f|f|
@@ -1152,7 +1124,7 @@ screenshots $OUTFOLDER/subdomains/alive.txt $OUTFOLDER/$domain-screenshots
  # |P|o|r|t| |S|c|a|n|n|i|n|g|
  # +-+-+-+-+ +-+-+-+-+-+-+-+-+
 
- portscan $DOMAINS $OUTFOLDER/DNS/ip_only.txt $OUTFOLDER/portscan/
+ #portscan $DOMAINS $OUTFOLDER/DNS/ip_only.txt $OUTFOLDER/portscan/
 
  # +-+-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+-+-+-+
  # |E|n|d|p|o|i|n|t|s| |e|n|u|m|e|r|a|t|i|o|n|
