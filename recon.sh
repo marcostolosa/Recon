@@ -759,6 +759,7 @@ linkDiscovery() {
 endpointsEnumeration() {
 	alive_domains="$1"
 	output_folder="$2"
+	echo "Dominios:\n$1"
 	if [ "$(cat $alive_domains | wc -l)" -ge "1" ]; then
 		if [ "$QUIET" != "True" ]; then
 			printf "\n\033[1;32m"
