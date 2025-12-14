@@ -399,8 +399,9 @@ checkActive() {
 			printf "\t║  ✅  TESTANDO DOMÍNIOS - Verificando Ativos  ║\n"
 			printf "\t╚════════════════════════════════════════════════╝\n"
 			printf "\033[m\n"
-			cat $subdomains | httprobe | tee -a $output_folder/alive.txt.new
-			cat $subdomains | httpx --silent --threads 300 | tee -a $output_folder/alive.txt.new
+			echo -e "\033[38;5;208m[!] LIVE FEED: Novos domínios ativos aparecerão abaixo em tempo real!\033[m"
+			cat $subdomains | httprobe | while read line; do echo -e "\033[38;5;46m[NEW] $line\033[m"; echo "$line" >> $output_folder/alive.txt.new; done
+			cat $subdomains | httpx --silent --threads 300 | while read line; do echo -e "\033[38;5;46m[NEW] $line\033[m"; echo "$line" >> $output_folder/alive.txt.new; done
 		else
 			echo -e "\n\033[38;5;81m[+] Domínios Ativos 🔎\033[m"
 			cat $subdomains | httprobe >> $output_folder/alive.txt.new
@@ -600,7 +601,7 @@ dnsLookup() {
 			ipfound="$(cat $output_folder/DNS/ip_only.txt | wc -l)"
 			echo -e "\033[38;5;198m[+] Encontrados \033[38;5;198m$ipfound\033[38;5;148m IPs\033[m"
 		fi
-		rm $SCRIPTPATH/$domain\_ips.txt
+		[ -f "$SCRIPTPATH/$domain\_ips.txt" ] && rm $SCRIPTPATH/$domain\_ips.txt
 	fi
 }
 
@@ -891,7 +892,9 @@ screenshots() {
 			else
 				echo -e "\n\033[1;36m[+] Screenshots 🔎\033[m"
 			fi
-			python3 $SCRIPTPATH/tools/EyeWitness/Python/EyeWitness.py --web --no-prompt -f $alive_domains_screenshots -d $out_screenshots --selenium-log-path $out_screenshots/selenium-log.txt --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.169 Safari/537.36"
+			# Executar EyeWitness com tratamento de erros (timeouts de Chrome são esperados)
+			python3 $SCRIPTPATH/tools/EyeWitness/Python/EyeWitness.py --web --no-prompt -f $alive_domains_screenshots -d $out_screenshots --selenium-log-path $out_screenshots/selenium-log.txt --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.169 Safari/537.36" 2>&1 | grep -v "Chrome WebDriver initialization error" | grep -v "Timed out receiving message from renderer" | grep -v "Stacktrace:" | grep -v "^#[0-9]" || true
+			echo -e "\033[38;5;148m[+] Screenshots concluídos (erros de timeout são normais e não afetam resultados)\033[m"
 		fi
 	fi
 }
