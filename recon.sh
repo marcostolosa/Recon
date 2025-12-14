@@ -196,10 +196,13 @@ show_progress() {
 		completed_steps=$(grep -c ":completed:" "$checkpoint_file" 2>/dev/null || echo 0)
 	fi
 
+	# Remove quebras de linha e garante valores numéricos válidos
+	completed_steps=$(echo "$completed_steps" | tr -d '\n\r' | sed 's/[^0-9]//g')
+	[ -z "$completed_steps" ] && completed_steps=0
+
+	total_steps=$(echo "$total_steps" | tr -d '\n\r' | sed 's/[^0-9]//g')
 	# Evita divisão por zero
-	if [ "$total_steps" -eq 0 ]; then
-		total_steps=17
-	fi
+	[ -z "$total_steps" ] || [ "$total_steps" -eq 0 ] 2>/dev/null && total_steps=17
 
 	local percentage=$((completed_steps * 100 / total_steps))
 
@@ -286,9 +289,9 @@ wafDetect() {
 			echo " ✅"
 		else
 			printf "\n\033[38;5;198m"
-			printf "\t░█▀▄░█▀▀░▀█▀░█▀▀░█▀▀░▀█▀░█▀█░█▀█░█▀▄░█▀█░░░█░█░█▀█░█▀▀\n"
-			printf "\t░█░█░█▀▀░░█░░█▀▀░█░░░░█░░█▀█░█░█░█░█░█░█░░░█▄█░█▀█░█▀▀\n"
-			printf "\t░▀▀░░▀▀▀░░▀░░▀▀▀░▀▀▀░░▀░░▀░▀░▀░▀░▀▀░░▀▀▀░░░▀░▀░▀░▀░▀░░\n"
+		printf "\t╔════════════════════════════════════════════════╗\n"
+		printf "\t║  🛡️  DETECÇÃO WAF - Identificando Firewalls  ║\n"
+		printf "\t╚════════════════════════════════════════════════╝\n"
 			printf "\033[m\n"
 			wafw00f -i $1 -a -o $OUTFOLDER/subdomains/waf.txt
 		fi
@@ -348,10 +351,10 @@ asnEnum() {
 		printf "\t║  🔍  ENUMERAÇÃO ASN - Mapeando Redes  🔍     ║\n"
 		printf "\t╚════════════════════════════════════════════════╝\n"
 		printf "\033[m\n"
-		echo $org | metabigor net --org -o $output_folder/$org.txt.new
+		ASSUME_NO_MOVING_GC_UNSAFE_RISK_IT_WITH=go1.25 echo $org | metabigor net --org -o $output_folder/$org.txt.new 2>/dev/null
 	else
 		echo -e -n "\n\033[38;5;81m[+] Enumeração ASN 🔎\033[m"
-		echo $org | metabigor net --org >> $output_folder/$org.txt.new
+		ASSUME_NO_MOVING_GC_UNSAFE_RISK_IT_WITH=go1.25 echo $org | metabigor net --org >> $output_folder/$org.txt.new 2>/dev/null
 		echo " ✅"
 	fi
 
@@ -457,9 +460,9 @@ subdomainEnumeration() {
 			findomain -q --target $target | tee -a $output_folder/subdomains.txt.new || $GOPATH/bin/findomain -q --target $target | tee -a $output_folder/subdomains.txt.new
 			echo -e "\n\033[38;5;81m>>>\033[38;5;141m Executando SubDomainizer 🔍\033[m"
 			sublist3r -d $target -o $SCRIPTPATH/sublist3r-$domain.txt
-			cat $SCRIPTPATH/sublist3r-$domain.txt >> $output_folder/subdomains.txt.new
-			rm $SCRIPTPATH/sublist3r-$domain.txt
-			knockpy $target --wordlist $wordlist --save $output_folder/knockpy/ --threads 5
+			[ -f "$SCRIPTPATH/sublist3r-$domain.txt" ] && cat $SCRIPTPATH/sublist3r-$domain.txt >> $output_folder/subdomains.txt.new
+			[ -f "$SCRIPTPATH/sublist3r-$domain.txt" ] && rm $SCRIPTPATH/sublist3r-$domain.txt
+			knockpy -d $target -w $wordlist --save $output_folder/knockpy/ -t 5
 			if [ "$GHAPIKEY" != "False" ]; then
 				echo -e "\n\033[38;5;81m>>>\033[38;5;141m Executando Github-Subdomains 🔍\033[m"
 				python3 $SCRIPTPATH/tools/github-search/github-subdomains.py -t $GHAPIKEY -d $target | tee -a $output_folder/subdomains.txt.new
@@ -481,13 +484,13 @@ subdomainEnumeration() {
 			echo " ✅"
 			echo -e -n "\n\033[38;5;81m>>>\033[38;5;141m Executando sublist3r 🔍\033[m"
 			sublist3r -d $target -o $SCRIPTPATH/sublist3r-$domain.txt > $SCRIPTPATH/temp.txt
-			cat $SCRIPTPATH/sublist3r-$domain.txt >> $output_folder/subdomains.txt.new
-			rm $SCRIPTPATH/sublist3r-$domain.txt
-			rm $SCRIPTPATH/temp.txt
+			[ -f "$SCRIPTPATH/sublist3r-$domain.txt" ] && cat $SCRIPTPATH/sublist3r-$domain.txt >> $output_folder/subdomains.txt.new
+			[ -f "$SCRIPTPATH/sublist3r-$domain.txt" ] && rm $SCRIPTPATH/sublist3r-$domain.txt
+			[ -f "$SCRIPTPATH/temp.txt" ] && rm $SCRIPTPATH/temp.txt
 			echo " ✅"
 			echo -e -n "\n\033[38;5;81m>>>\033[38;5;141m Executando Knockpy 🔍\033[m"
-			knockpy $target -w $wordlist -o $output_folder/knockpy/ -t 5 > $SCRIPTPATH/knocktemp
-			rm $SCRIPTPATH/knocktemp
+			knockpy -d $target -w $wordlist -o $output_folder/knockpy/ -t 5 > $SCRIPTPATH/knocktemp
+			[ -f "$SCRIPTPATH/knocktemp" ] && rm $SCRIPTPATH/knocktemp
 			echo " ✅"
 			if [ "$GHAPIKEY" != "False" ]; then
 				echo -e -n "\033[38;5;81m>>>\033[38;5;141m Executando Github-Subdomains 🔍\033[m"
@@ -495,8 +498,8 @@ subdomainEnumeration() {
 				echo " ✅"
 			fi
 		fi
-		cat $SCRIPTPATH/SubDomainizer$domain.txt >> $output_folder/subdomains.txt.new
-		rm $SCRIPTPATH/SubDomainizer$domain.txt
+		[ -f "$SCRIPTPATH/SubDomainizer$domain.txt" ] && cat $SCRIPTPATH/SubDomainizer$domain.txt >> $output_folder/subdomains.txt.new
+		[ -f "$SCRIPTPATH/SubDomainizer$domain.txt" ] && rm $SCRIPTPATH/SubDomainizer$domain.txt
 		#for a in $(ls $output_folder/knockpy/*); do
 		#	python3 $SCRIPTPATH/scripts/knocktofile.py -f $a -o $SCRIPTPATH/knock.txt
 		#done
@@ -611,9 +614,9 @@ favAnalysis() {
 		[[ ! -d $FAVOUT ]] && mkdir $FAVOUT
 		if [ "$QUIET" != "True" ]; then
 			printf "\n\033[38;5;198m"
-			printf "\t░█▀█░█▀█░█▀█░█░░░▀█▀░█▀▀░█▀▀░░░█▀▀░█▀█░█░█░▀█▀░█▀▀░█▀█░█▀█\n"
-			printf "\t░█▀█░█░█░█▀█░█░░░░█░░▀▀█░█▀▀░░░█▀▀░█▀█░▀▄▀░░█░░█░░░█░█░█░█\n"
-			printf "\t░▀░▀░▀░▀░▀░▀░▀▀▀░▀▀▀░▀▀▀░▀▀▀░░░▀░░░▀░▀░░▀░░▀▀▀░▀▀▀░▀▀▀░▀░▀\n"
+			printf "\t╔════════════════════════════════════════════════╗\n"
+			printf "\t║  🎨  ANÁLISE FAVICON - Hash Fingerprinting   ║\n"
+			printf "\t╚════════════════════════════════════════════════╝\n"
 			printf "\033[m\n"
 			cat $alive_domains | python3 $SCRIPTPATH/tools/FavFreak/favfreak.py --shodan -o $FAVOUT
 		else
@@ -655,9 +658,9 @@ dirFuzz() {
 	if [ "$(cat $alive_domains_fuzz | wc -l)" -ge "1" ];then
 		if [ "$QUIET" != "True" ]; then
 			printf "\n\033[38;5;198m"
-			printf "\t░█▀▀░█░█░▀▀█░▀▀█░░░█▀▄░▀█▀░█▀▄░█▀▀░▀█▀░█▀█░█▀▄░▀█▀░█▀█░█▀▀\n"
-			printf "\t░█▀▀░█░█░▄▀░░▄▀░░░░█░█░░█░░█▀▄░█▀▀░░█░░█░█░█▀▄░░█░░█░█░▀▀█\n"
-			printf "\t░▀░░░▀▀▀░▀▀▀░▀▀▀░░░▀▀░░▀▀▀░▀░▀░▀▀▀░░▀░░▀▀▀░▀░▀░▀▀▀░▀▀▀░▀▀▀\n"
+			printf "\t╔════════════════════════════════════════════════╗\n"
+			printf "\t║  📁  FUZZING DE DIRETÓRIOS - Brute Force     ║\n"
+			printf "\t╚════════════════════════════════════════════════╝\n"
 			printf "\033[m\n"
 		else
 			echo -e "\n\033[38;5;81m[+] Fuzzing de Diretórios 🔎\033[m"
@@ -677,9 +680,9 @@ googleHacking() {
 	if [ -n $output_folder_googledorks ]; then
 		if [ "$QUIET" != "True" ]; then
 			printf "\n\033[38;5;198m"
-			printf "\t░█▀▄░█▀█░█▀▄░█░█░█▀▀░░░█▀▀░█▀█░█▀█░█▀▀░█░░░█▀▀\n"
-			printf "\t░█░█░█░█░█▀▄░█▀▄░▀▀█░░░█░█░█░█░█░█░█░█░█░░░█▀▀\n"
-			printf "\t░▀▀░░▀▀▀░▀░▀░▀░▀░▀▀▀░░░▀▀▀░▀▀▀░▀▀▀░▀▀▀░▀▀▀░▀▀▀\n"
+			printf "\t╔════════════════════════════════════════════════╗\n"
+			printf "\t║  🔍  GOOGLE DORKS - Gerando Consultas        ║\n"
+			printf "\t╚════════════════════════════════════════════════╝\n"
 			printf "\033[m\n"
 		else
 			echo -e "\n\033[1;36m[+] Dorks Google 🔎\033[m"
@@ -734,9 +737,9 @@ ghDork() {
 	out_ghdork="$1"
 	if [ "$QUIET" != "True" ]; then
 		printf "\n\033[1;32m"
-		printf "\t░█▀▀░▀█▀░▀█▀░█░█░█░█░█▀▄░░░█▀▄░█▀█░█▀▄░█░█░█▀▀\n"
-		printf "\t░█░█░░█░░░█░░█▀█░█░█░█▀▄░░░█░█░█░█░█▀▄░█▀▄░▀▀█\n"
-		printf "\t░▀▀▀░▀▀▀░░▀░░▀░▀░▀▀▀░▀▀░░░░▀▀░░▀▀▀░▀░▀░▀░▀░▀▀▀\n"
+		printf "\t╔════════════════════════════════════════════════╗\n"
+		printf "\t║  💻  GITHUB DORKS - Buscando Secrets          ║\n"
+		printf "\t╚════════════════════════════════════════════════╝\n"
 		printf "\033[m\n"
 	else
 		echo -e "\n\033[1;36m[+] Dorks GitHub 🔎\033[m"
@@ -861,9 +864,9 @@ credStuff() {
 	if [ "$domain" != "" ]; then
 		if [ "$QUIET" != "True" ]; then
 			printf "\n\033[1;32m"
-			printf "\t░█▀▀░█▀▄░█▀▀░█▀▄░░░█▀▀░▀█▀░█░█░█▀▀░█▀▀\n"
-			printf "\t░█░░░█▀▄░█▀▀░█░█░░░▀▀█░░█░░█░█░█▀▀░█▀▀\n"
-			printf "\t░▀▀▀░▀░▀░▀▀▀░▀▀░░░░▀▀▀░░▀░░▀▀▀░▀░░░▀░░\n"
+			printf "\t╔════════════════════════════════════════════════╗\n"
+			printf "\t║  🔐  CREDENTIAL STUFFING - Hunting Leaks     ║\n"
+			printf "\t╚════════════════════════════════════════════════╝\n"
 			printf "\033[m\n"
 			$SCRIPTPATH/tools/CredStuff-Auxiliary/CredStuff_Auxiliary/main.sh $domain $1 | tee -a $output_folder/credstuff/credstuff.txt
 		else
@@ -881,9 +884,9 @@ screenshots() {
 		if [ "$(cat $alive_domains_screenshots | wc -l)" -ge "1" ]; then
 			if [ "$QUIET" != "True" ]; then
 				printf "\n\033[1;32m"
-				printf "\t░█▀▀░█▀▀░█▀▄░█▀▀░█▀▀░█▀█░█▀▀░█░█░█▀█░▀█▀░█▀▀\n"
-				printf "\t░▀▀█░█░░░█▀▄░█▀▀░█▀▀░█░█░▀▀█░█▀█░█░█░░█░░▀▀█\n"
-				printf "\t░▀▀▀░▀▀▀░▀░▀░▀▀▀░▀▀▀░▀░▀░▀▀▀░▀░▀░▀▀▀░░▀░░▀▀▀\n"
+				printf "\t╔════════════════════════════════════════════════╗\n"
+				printf "\t║  📸  SCREENSHOTS - Capturando Páginas         ║\n"
+				printf "\t╚════════════════════════════════════════════════╝\n"
 				printf "\033[m\n"
 			else
 				echo -e "\n\033[1;36m[+] Screenshots 🔎\033[m"
@@ -902,9 +905,9 @@ portscan() {
 		[[ ! -d $Ooutput_folder ]] && mkdir $output_folder 2>/dev/null
 		if [ "$QUIET" != "True" ]; then
 			printf "\n\033[1;32m"
-			printf "\t░█▀█░█▀█░█▀▄░▀█▀░░░█▀▀░█▀▀░█▀█░█▀█\n"
-			printf "\t░█▀▀░█░█░█▀▄░░█░░░░▀▀█░█░░░█▀█░█░█\n"
-			printf "\t░▀░░░▀▀▀░▀░▀░░▀░░░░▀▀▀░▀▀▀░▀░▀░▀░▀\n"
+			printf "\t╔════════════════════════════════════════════════╗\n"
+			printf "\t║  🔌  PORT SCAN - Mapeando Serviços            ║\n"
+			printf "\t╚════════════════════════════════════════════════╝\n"
 			printf "\033[m\n"
 			echo -e "\n\033[36m>>>\033[35m Executando Nmap 🔍\033[m\n"
 			nmap -iL $portscan_domains --top-ports 5000 --max-rate=50000 -oG $output_folder/nmap.txt
@@ -995,16 +998,12 @@ endpointsEnumeration() {
 		fi
 		if [ "$QUIET" != "True" ]; then
 			echo -e "\n\033[36m>>>\033[35m Extracting URLs 🔍\033[m"
-			xargs -a $alive_domains -I@ bash -c "paramspider -d @ "
+			xargs -a $alive_domains -I@ bash -c "$SCRIPTPATH/.venv/bin/paramspider -d @ -s 2>/dev/null" >> $output_folder/all.txt
 		else
 			echo -e -n "\n\033[36m>>>\033[35m Extracting URLs 🔍\033[m"
-			xargs -a $alive_domains -I@ bash -c "paramspider -d @ " > $SCRIPTPATH/paramspidertemp
-			rm $SCRIPTPATH/paramspidertemp
+			xargs -a $alive_domains -I@ bash -c "$SCRIPTPATH/.venv/bin/paramspider -d @ -s 2>/dev/null" >> $output_folder/all.txt
 			echo " ✅"
 		fi
-		cat $SCRIPTPATH/output/http:/* >> $output_folder/all.txt
-		cat $SCRIPTPATH/output/https:/* >> $output_folder/all.txt
-		rm -rf $SCRIPTPATH/output/
 		sort -u $output_folder/all.txt -o $output_folder/all.txt
 		[[ ! -d $output_folder/js ]] && mkdir $output_folder/js
 		echo -e "\n\033[36m>>>\033[35m Enumerating Javascript files 🔍\033[m"
