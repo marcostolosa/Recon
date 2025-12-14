@@ -1,151 +1,212 @@
-<h1 align="center">
-<a href="myrepository"><img src="https://user-images.githubusercontent.com/73609472/119388739-126fb780-bca1-11eb-8c3c-768432df5972.png" alt="Recon"></a>
-<br>
-👑 Recon 👑
-</h1>
-<p align="center">
-	<a href="https://twitter.com/Dirsoooo">
-		<img src="https://img.shields.io/twitter/follow/Dirsoooo?color=%2389DDFF&label=Follow%20%40Dirsoooo&style=flat-square"
-	</a>
-	<a href="https://mit-license.org/">
-		<img src="https://img.shields.io/github/license/dirsoooo/Recon?color=%23C3E88D&style=flat-square">
-	</a>
-	<a href="https://github.com/dirsoooo/Recon">
-		<img src="https://img.shields.io/github/repo-size/dirsoooo/Recon?color=%23FFCB6B&style=flat-square">
-	</a>
-</p>
+# CVE-Hunters Recon Script
 
-The step of recognizing a target in both Bug Bounties and Pentest can be very time-consuming. Thinking about it, I decided to create my own recognition script with all the tools I use most in this step.
-All construction of this framework is based on the methodologies of [@ofjaaah](https://twitter.com/ofjaaah) and [@Jhaddix](https://twitter.com/Jhaddix). These people were my biggest inspirations to start my career in Information Security and I recommend that you take a look at their content, you will learn a lot!<br>
+Automated reconnaissance framework for bug bounty and penetration testing. Orchestrates 30+ security tools in a sequential pipeline with checkpoint support and intelligent result merging.
 
-## Usage 💡
+## Key Features
 
-![Help Menu](https://user-images.githubusercontent.com/73609472/119419242-3b5b7100-bcd0-11eb-9c2d-1afbfaf84122.png)
-### Basic usage
-```
-❯ ./recon.sh -d domain.com -w /path/to/your/wordlist.txt
-```
-### Quiet mode
-```
-❯ ./recon.sh -d domain.com -w /path/to/your/wordlist.txt -q
-```
-### Recommended usage
-```
-❯ ./recon.sh -d domain.com -w /path/to/your/wordlist.txt -g [github_api_key] -s [shodan_api_key] -f
-```
-![Usage](https://user-images.githubusercontent.com/73609472/119388865-3d5a0b80-bca1-11eb-94a8-2378a512d2b7.gif)
+**Checkpoint System**
+- Automatic resume on interruption (Ctrl+C)
+- State persistence across runs
+- Skip completed stages
 
-## Help menu 🔎
+**Incremental Scanning**
+- Merge new results with existing data
+- No overwrites, only additions
+- Shows delta between scans
 
-Option     		 | Value
----        		 | ---       
--h, --help 		 | `Look at the complete help menu`
--d       		 | `domain.com`
--w     		     | `Path to your wordlist. Some wordlists I've already added by default to ./wordlists`
--f				 | `Fuzzing mode. When passing this argument, the Fuzzing step to confirm possible vulnerabilities will be added. Directory Fuzzing will remain enabled regardless of whether the argument is passed or not. I recommend not to use this if you want to do a recon faster.`
--g      		 | `GitHub API Key. This parameter is used when searching for subdomains`
--s       		 | `Shodan API Key. This parameter is used to automate the search for domains associated with your target(Requires API Key premium). If you don't have it, you can do the searches manually and the dorks are saved in the output folder.`
--o     		     | `Your output folder. If you don't specify the parameter, all the results of the script will be saved in a folder with your target's name inside the script path`
--q       		 | `Quiet mode. All banners and details of the script's execution will not be shown in the terminal, but everything that is executed in normal mode is executed as well. You will be able to see all the results in detail in your output folder`
+**Modern Interface**
+- Monokai color scheme
+- Progress tracking (X/17 stages, Y%)
+- Clean box-style stage banners
 
-## Features ✅
-### ASN Enumeration
-- [metabigor](https://github.com/j3ssie/metabigor)
-### Subdomain Enumeation
-- [Assetfinder](https://github.com/tomnomnom/assetfinder)
-- [Subfinder](https://github.com/projectdiscovery/subfinder)
-- [Amass](https://github.com/OWASP/Amass)
-- [Findomain](https://github.com/Findomain/Findomain)
-- [Sublist3r](https://github.com/aboul3la/Sublist3r)
-- [Knock](https://github.com/guelfoweb/knock)
-- [SubDomainizer](https://github.com/nsonaniya2010/SubDomainizer)
-- [GitHub Sudomains](https://github.com/gwen001/github-search/blob/master/github-subdomains.py)
-- [RapidDNS](https://rapiddns.io/)
-- [Riddler](https://riddler.io/)
-- [SecurityTrails](https://securitytrails.com/)
-### Alive Domains
-- [httprobe](https://github.com/tomnomnom/httprobe)
-- [httpx](https://github.com/projectdiscovery/httpx)
-### WAF Detect
-- [wafw00f](https://github.com/EnableSecurity/wafw00f)
-### Domain organization
-- Regular expressions
-### Subdomain Takeover
-- [Subjack](https://github.com/haccer/subjack)
-### DNS Lookup
-#### Discovering IPs
-- [dnsx](https://github.com/projectdiscovery/dnsx)
-#### DNS Enumeration and Zone Transfer
-- [dnsrecon](https://github.com/darkoperator/dnsrecon)
-- [dnsenum](https://github.com/fwaeytens/dnsenum)
-### Favicon Analysis
-- [favfreak](https://github.com/devanshbatham/FavFreak)
-- [Shodan](https://www.shodan.io/)
-### Directory Fuzzing
-- [ffuf](https://github.com/ffuf/ffuf)
-### Google Hacking
-- Some Dorks that I consider important
-- [CredStuff-Auxiliary](https://github.com/pedr4uz/CredStuff-Auxiliary)
-- [Googler](https://github.com/jarun/googler)
-### GitHub Dorks
-- [Jhaddix Dorks](https://gist.github.com/jhaddix/1fb7ab2409ab579178d2a79959909b33)
-### Credential Stuffing
-- [CredStuff-Auxiliary](https://github.com/pedr4uz/CredStuff-Auxiliary)
-### Screenshots
-- [EyeWitness](https://github.com/FortyNorthSecurity/EyeWitness)
-### Port Scan
-- [Masscan](https://github.com/robertdavidgraham/masscan)
-- [Nmap](https://github.com/nmap/nmap)
-- [Naabu](https://github.com/projectdiscovery/naabu)
-### Link Discovery
-#### Endpoints Enumeration and Finding JS files
-- [Hakrawler](https://github.com/hakluke/hakrawler)
-- [Waybackurls](https://github.com/tomnomnom/waybackurls)
-- [Gospider](https://github.com/jaeles-project/gospider)
-- [ParamSpider](https://github.com/devanshbatham/ParamSpider)
-### Vulnerabilities
-- [Nuclei](https://github.com/projectdiscovery/nuclei) **➔ I used all the default templates**
-#### 403 Forbidden Bypass
-- [Bypass-403](https://github.com/iamj0ker/bypass-403)
-#### XSS
-- [XSStrike](https://github.com/s0md3v/XSStrike)
-- [Gxss](https://github.com/KathanP19/Gxss)
-#### LFI
-- Oneliners
-	- [gf](https://github.com/tomnomnom/gf)
-	- [ffuf](https://github.com/ffuf/ffuf)
-#### RCE
-- My GrepVuln function
-#### Open Redirect
-- My GrepVuln function
-#### SQLi
-- Oneliners
-	- [gf](https://github.com/tomnomnom/gf) 
-	- [sqlmap](https://github.com/sqlmapproject/sqlmap)
 ## Installation
-I made a script that automates the installation of all tools. I tried to do it with the intention of having compatibility with the most used systems in Pentest and Bug Bounty.
-```
-git clone https://github.com/dirsoooo/Recon.git
+
+```bash
+git clone https://github.com/marcostolosa/Recon.git
 cd Recon/
-chmod +x recon.sh
-chmod +x installation.sh
+chmod +x subs.sh installation.sh
 ./installation.sh
 ```
-**Please DO NOT remove any of the files inside the folder, they are all important!**
-### Installation script tested on:
-- Kali Linux <br>[<img width="100px" src="https://lcom.static.linuxfound.org/images/stories/66866/kali-logo.png">](https://www.kali.org/)
-- Arch Linux <br>[<img style="padding-left: 20px;" width="64px" src="https://upload.wikimedia.org/wikipedia/commons/thumb/a/a5/Archlinux-icon-crystal-64.svg/1024px-Archlinux-icon-crystal-64.svg.png">](https://archlinux.org/)
-- BlackArch Linux <br>[<img width="64px" src="https://user-images.githubusercontent.com/73609472/119390274-2c11fe80-bca3-11eb-9660-09db99b6d9cb.png">](https://blackarch.org/)
-- Ubuntu <br>[<img style="padding-left: 20px;" width="64px" src="https://ubuntu.com/favicon.ico">](https://ubuntu.com/)
-- Parrot Security <br>[<img style="padding-left: 20px;" width="64px"  src="https://upload.wikimedia.org/wikipedia/commons/4/45/Parrot_Logo.png">](https://www.parrotsec.org/)
-## Poject Mindmap
 
-![Mindmap](https://user-images.githubusercontent.com/73609472/119389097-8a3de200-bca1-11eb-831b-d8739075695f.png)
+Installation script supports: Kali, Arch/BlackArch, Ubuntu/Debian, Parrot
+
+## Usage
+
+### Basic Scan
+```bash
+./subs.sh -d target.com -w wordlists/common.txt
+```
+
+### With API Keys
+```bash
+./subs.sh -d target.com -w wordlists/common.txt -g <github-key> -s <shodan-key>
+```
+
+### Quiet Mode
+```bash
+./subs.sh -d target.com -w wordlists/common.txt -q
+```
+
+### Custom Output Directory
+```bash
+./subs.sh -d target.com -w wordlists/big.txt -o /path/to/output
+```
+
+### Enable Fuzzing
+```bash
+./subs.sh -d target.com -w wordlists/common.txt -f
+```
+
+## Command Line Options
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| -d | Yes | Target domain |
+| -w | Yes | Wordlist path (see wordlists/ directory) |
+| -g | No | GitHub API key for subdomain enumeration |
+| -s | No | Shodan API key (Premium required) |
+| -o | No | Custom output folder (default: ./domain) |
+| -q | No | Quiet mode (minimal console output) |
+| -f | No | Enable fuzzing mode (slower, validates vulns) |
+
+## Checkpoint System
+
+The script creates a `.checkpoint` file in the output folder tracking completed stages:
+
+```
+# CVE-Hunters Checkpoint File
+# Scan iniciado em: 2025-01-13 14:30:45
+# Alvo: example.com
+
+asn_enum:completed:2025-01-13 14:31:22
+subdomain_enum:completed:2025-01-13 14:45:18
+```
+
+**Resume interrupted scan:**
+```bash
+# First run - interrupted
+./subs.sh -d target.com -w wordlists/common.txt
+^C  # Ctrl+C after 5 stages
+
+# Second run - continues from stage 6
+./subs.sh -d target.com -w wordlists/common.txt
+# Output: [skip] Etapa 'asn_enum' já completa, pulando...
+```
+
+## Incremental Scanning
+
+Running the script multiple times on the same target:
+- Preserves existing results
+- Adds only new discoveries
+- Shows difference summary
+
+```bash
+# First scan
+./subs.sh -d target.com -w wordlists/common.txt
+# Output: [!] Encontrados 234 subdomínios
+
+# Second scan (days later)
+./subs.sh -d target.com -w wordlists/big.txt
+# Output: [+] Adicionados 47 novos subdomínios (total: 281)
+```
+
+## Pipeline Stages
+
+1. ASN Enumeration - metabigor
+2. Subdomain Discovery - assetfinder, subfinder, findomain, sublist3r, knockpy, github-subdomains
+3. Domain Organization - regex-based categorization
+4. Subdomain Takeover - subjack
+5. DNS Lookup - dnsx, dnsrecon, dnsenum
+6. Active Domain Check - httprobe, httpx
+7. WAF Detection - wafw00f
+8. Favicon Analysis - FavFreak + Shodan
+9. Directory Fuzzing - ffuf (optional)
+10. Credential Stuffing - CredStuff-Auxiliary
+11. Google Dorking - automated dork generation
+12. GitHub Dorking - secret search links
+13. Screenshots - EyeWitness
+14. Port Scanning - masscan, nmap, naabu (optional)
+15. Link Discovery - hakrawler, waybackurls, gospider, ParamSpider
+16. Vulnerability Scanning - Nuclei templates, XSS, LFI, RCE, SQLi detection
+
+## Output Structure
+
+```
+target.com/
+├── .checkpoint                    # Progress state file
+├── asn/                          # ASN enumeration
+│   └── target.txt
+├── subdomains/                   # Subdomain discovery
+│   ├── subdomains.txt           # All discovered subdomains
+│   ├── subdomains.txt.backup    # Pre-merge backup
+│   ├── alive.txt                # Active HTTP/HTTPS domains
+│   ├── alive.txt.backup         # Pre-merge backup
+│   ├── level-domains.txt        # Organized by domain level
+│   ├── waf.txt                  # WAF detection results
+│   └── subdomain-takeover/
+│       └── takeover.txt
+├── DNS/                          # DNS enumeration
+│   ├── dns.txt
+│   ├── ip_only.txt
+│   ├── dnsrecon.txt
+│   └── dnsenum.xml
+├── favicon-analysis/
+│   └── favfreak/
+├── dorks/
+│   ├── google-dorks/
+│   └── github-dorks/
+├── link-discovery/
+│   ├── all.txt                  # All discovered URLs
+│   ├── hakrawler/
+│   ├── waybackurls/
+│   ├── gospider/
+│   └── js/
+│       ├── js.txt               # All JS files
+│       └── AliveJS.txt          # Accessible JS files
+└── vuln/
+    ├── nuclei.txt               # Nuclei findings
+    ├── possible-xss.txt
+    ├── possible-open-redir.txt
+    ├── rce.txt
+    ├── lfi.txt
+    └── possible-sqli.txt
+```
+
+## Dependencies
+
+**Required Tools:** python3, go, git, pip3
+
+**Go Tools:** assetfinder, subfinder, httprobe, httpx, nuclei, hakrawler, waybackurls, ffuf, dalfox, anti-burl, Gxss, anew, qsreplace, gf, gospider, subjack, dnsx, metabigor, cf-check, naabu, filter-resolved
+
+**Python Tools:** sublist3r, knockpy, shodan, FavFreak, github-search, ParamSpider, XSStrike, SubDomainizer
+
+**System Tools:** amass, findomain, masscan, nmap, wafw00f, dnsrecon, dnsenum, figlet, lolcat
+
+All dependencies are installed by `installation.sh`
+
+## Notes
+
+**Runtime:** Full scan duration varies by target size (typically hours for large targets)
+
+**API Keys:**
+- GitHub key improves subdomain enumeration
+- Shodan premium required for automated favicon queries
+- Without keys, relevant scans are skipped
+
+**Fuzzing Mode (-f):** Significantly increases runtime, validates potential vulnerabilities
+
+**Interrupted Scans:** Resume capability requires running script with same output folder
+
+**Root Privileges:** Required for port scanning (masscan)
 
 ## License
-``Recon`` was entirely coded with ❤ by [@Dirsoooo](https://twitter.com/Dirsoooo) and it is released under the MIT license.
 
-## Buy me a coffee ☕
-If you liked my job and want to support me in some way, buy me a coffee 😁
+MIT License
 
-[<img width="400px" src="https://cdn.buymeacoffee.com/buttons/v2/default-blue.png">](https://www.buymeacoffee.com/dirso)
+## Credits
+
+Based on methodologies from [@ofjaaah](https://twitter.com/ofjaaah) and [@Jhaddix](https://twitter.com/Jhaddix)
+
+Original author: [@Dirsoooo](https://twitter.com/Dirsoooo)
+
+CVE-Hunters modifications: 2025
