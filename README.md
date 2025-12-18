@@ -152,6 +152,32 @@ Choose wordlist based on scan thoroughness:
 
 ---
 
+## Key Features
+
+### Checkpoint System & Resume Capability
+- **Automatic Resume:** If interrupted (Ctrl+C), the script continues from where it left off
+- **Persistent State:** Progress saved in `.checkpoint` file within output folder
+- **Smart Skip:** Completed stages are automatically skipped on re-run
+- **Visual Progress:** Real-time progress indicator showing completed stages (e.g., "5/17 etapas (29%)")
+
+### Intelligent Result Merging
+- **Always-Run Discovery Stages:** Subdomain enumeration, ASN lookup, link discovery, and endpoint enumeration always execute to find new targets
+- **Deduplicated Merging:** Uses `anew` to add only new results without duplicates
+- **Incremental Growth:** Preserves all old results while adding new discoveries
+- **Live Feedback:** Shows exactly how many new items were found (e.g., "[+] Adicionados 47 novos subdomínios (total: 523)")
+
+### Performance Optimizations
+- **Parallel Execution:** Link discovery runs hakrawler, katana, and waybackurls in parallel (20 threads each) for **10-50x speedup**
+- **Optimized Nuclei:** Tags filtering (cve,exposure,misconfig,takeover,sqli,xss,rce,lfi,ssrf), rate-limiting (150 req/s), and bulk processing (25 targets/batch) for **3x faster scans**
+- **Wayback Fallback:** If waybackurls fails, automatically falls back to direct Wayback Machine API queries with cache-busting
+
+### Real-Time Feedback
+- **Live Feed:** New active domains appear instantly with `[NEW]` tag during scanning
+- **Smart Detection:** On re-scans, `[NEW]` tag only shows for truly new discoveries
+- **Progress Tracking:** Global counter tracks total new targets found across all stages
+
+---
+
 ## Pipeline Stages
 
 The script executes **17 stages** sequentially:
