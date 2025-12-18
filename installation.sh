@@ -113,7 +113,7 @@ installGoTools() {
 	bannerInstall "Metabigor"
 	go install github.com/j3ssie/metabigor@latest
 	bannerInstall "Cf-check"
-	$ go install github.com/dwisiswant0/cf-check@latest
+	go install github.com/dwisiswant0/cf-check@latest
 	bannerInstall "Naabu"
 	if [ "$os" == "kali" ] || [ "$os" == "debian" ] || [ "$os" == "parrot" ]; then
 		sudo apt install -y libpcap-dev
@@ -121,6 +121,10 @@ installGoTools() {
 	go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
 	bannerInstall "Filter-Resolved"
 	go install github.com/tomnomnom/hacks/filter-resolved@latest
+	bannerInstall "GetJS"
+	go install -v github.com/003random/getJS@latest
+	bannerInstall "Katana"
+	go install -v github.com/projectdiscovery/katana/cmd/katana@latest
 	if [ -e /usr/local/go/bin ]; then
 		sudo mv $HOME/go/bin/* /usr/local/go/bin
 	else
@@ -154,28 +158,22 @@ installGitCloneTools() {
 	cd $SCRIPTPATH/tools
 	bannerInstall "EyeWitness"
 	git clone https://github.com/FortyNorthSecurity/EyeWitness.git
-	pip3 install python-Levenshtein
 	bannerInstall "FavFreak"
 	git clone https://github.com/devanshbatham/FavFreak.git
-	pip3 install -r $SCRIPTPATH/tools/FavFreak/requirements.txt
 	bannerInstall "GitHub Search"
 	git clone https://github.com/gwen001/github-search.git
-	pip3 install -r $SCRIPTPATH/tools/github-search/requirements2.txt
 	bannerInstall "ParamSpider"
 	git clone https://github.com/devanshbatham/ParamSpider.git
-	pip3 install -r $SCRIPTPATH/tools/ParamSpider/requirements.txt
 	bannerInstall "XSStrike"
 	git clone https://github.com/s0md3v/XSStrike.git
-	pip3 install -r $SCRIPTPATH/tools/XSStrike/requirements.txt
 	bannerInstall "SubDomainizer"
 	if [ "$os" == "arch" ]; then
 		sudo pacman -S wget --needed
 	fi
 	wget https://raw.githubusercontent.com/nsonaniya2010/SubDomainizer/master/SubDomainizer.py
 	wget https://raw.githubusercontent.com/nsonaniya2010/SubDomainizer/master/requirements.txt
-	pip3 install -r $SCRIPTPATH/tools/requirements.txt
-	rm $SCRIPTPATH/tools/requirements.txt 2>/dev/null
 	cd $SCRIPTPATH
+	echo -e "\033[1;33m[!] Python dependencies will be installed in venv by setupPythonVenv()\033[m"
 }
 
 
@@ -239,12 +237,12 @@ installTools() {
 		sudo pacman -S --needed python3 python-pip go amass sublist3r findomain dnsenum masscan nmap wafw00f dnsrecon assetfinder subfinder httprobe httpx nuclei hakrawler waybackurls dalfox metabigor dnsx ffuf subjack gospider python-shodan figlet lolcat
 		installKnockpy
 	elif [ "$os" == "kali" ]; then
-		sudo apt install sublist3r figlet lolcat -y
+		sudo apt install sublist3r dnsenum figlet lolcat -y
 		installFindomain
 		installKnockpy
 	else
 		installFindomain
-		sudo apt install masscan nmap wafw00f dnsrecon figlet lolcat -y
+		sudo apt install masscan nmap wafw00f dnsrecon dnsenum figlet lolcat -y
 		if [ "$os" == "debian" ]; then
 			sudo apt install snap -y
 			snap install amass
@@ -260,6 +258,43 @@ installTools() {
 		sudo rm -rf $SCRIPTPATH/Sublist3r
 	fi
 }
+
+setupPythonVenv() {
+	bannerInstall "Python Virtual Environment"
+	echo -e "\033[1;32m[+] Creating Python venv at $SCRIPTPATH/.venv\033[m"
+	python3 -m venv $SCRIPTPATH/.venv
+
+	echo -e "\033[1;32m[+] Activating venv and upgrading pip\033[m"
+	source $SCRIPTPATH/.venv/bin/activate
+	pip install --upgrade pip
+
+	echo -e "\033[1;32m[+] Installing Python tools in venv\033[m"
+	# Instalar dependências das ferramentas clonadas
+	if [ -f "$SCRIPTPATH/tools/FavFreak/requirements.txt" ]; then
+		pip install -r $SCRIPTPATH/tools/FavFreak/requirements.txt
+	fi
+	if [ -f "$SCRIPTPATH/tools/github-search/requirements2.txt" ]; then
+		pip install -r $SCRIPTPATH/tools/github-search/requirements2.txt
+	fi
+	if [ -f "$SCRIPTPATH/tools/ParamSpider/requirements.txt" ]; then
+		pip install -r $SCRIPTPATH/tools/ParamSpider/requirements.txt
+	fi
+	if [ -f "$SCRIPTPATH/tools/XSStrike/requirements.txt" ]; then
+		pip install -r $SCRIPTPATH/tools/XSStrike/requirements.txt
+	fi
+
+	# EyeWitness precisa de python-Levenshtein
+	pip install python-Levenshtein
+
+	# SubDomainizer requirements
+	if [ -f "$SCRIPTPATH/tools/requirements.txt" ]; then
+		pip install -r $SCRIPTPATH/tools/requirements.txt
+	fi
+
+	deactivate
+	echo -e "\033[1;32m[+] Python venv setup complete!\033[m"
+}
+
 
 installWordlists() {
 	bannerInstall "Wordlists"
@@ -279,6 +314,7 @@ installGo
 installGoTools
 installGitCloneTools
 installTools
+setupPythonVenv
 installWordlists
 
 echo -e "\033[1;32m[+] Done\033[m"
