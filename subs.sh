@@ -103,12 +103,14 @@ show_banner() {
 
 show_help() {
 	show_banner
-	echo -e "\n\tUso: \033[38;5;208m./subs.sh \033[38;5;198m[ -d dominio ]\033[38;5;81m [ -w wordlist.txt ]\033[38;5;228m [ -g GitHub-API_KEY ] [ -s Shodan-API_KEY ]\033[m [ -q ] [ -f ]"
+	echo -e "\n\tUso: \033[38;5;208m./subs.sh \033[38;5;198m[ -d dominio ]\033[38;5;81m [ -w wordlist.txt ]\033[38;5;228m [ -g GitHub-API_KEY ] [ -s Shodan-API_KEY ]\033[m [ -q ] [ -f ] [ -D ] [ -P ]"
 	echo -e "\n\t-d  | (obrigatório) : Seu \033[38;5;198malvo\033[m"
 	echo -e "\t-w  | (obrigatório) : Caminho para sua \033[38;5;81mwordlist\033[m"
 	echo -e "\t-q  | (opcional)    : Modo silencioso"
 	echo -e "\t-o  | (opcional)    : Pasta de saída. Padrão é a pasta do script"
-	echo -e "\t-f  | (opcional)    : Ativar modo Fuzzing"
+	echo -e "\t-f  | (opcional)    : Ativar modo Fuzzing de vulnerabilidades"
+	echo -e "\t-D  | (opcional)    : Ativar Directory Fuzzing (brute force de diretórios)"
+	echo -e "\t-P  | (opcional)    : Ativar Port Scanning (requer sudo)"
 	echo -e "\n\t\033[38;5;228m[!] API_KEYS. Não passar suas chaves API significa que scans que precisam delas serão pulados\033[m"
 	echo -e "\t-g  | (opcional)    : Sua chave \033[38;5;228mAPI do GitHub\033[m"
 	echo -e "\t-s  | (opcional)    : Sua chave \033[38;5;228mAPI do Shodan\033[38;5;198m (Requer API Premium)\033[m"
@@ -182,6 +184,19 @@ mark_step_complete() {
 	show_progress
 }
 
+# Banner de step limpo e profissional
+show_step_banner() {
+	local emoji="$1"
+	local title="$2"
+	local color="${3:-81}" # Cyan por padrão
+
+	echo ""
+	echo -e "   \033[38;5;${color}m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[m"
+	echo -e "   \033[1;38;5;231m${emoji}  ${title}\033[m"
+	echo -e "   \033[38;5;240m────────────────────────────────────────────────────────────\033[m"
+	echo ""
+}
+
 # Mostra progresso atual
 show_progress() {
 	if [ "$QUIET" == "True" ]; then
@@ -206,9 +221,9 @@ show_progress() {
 
 	local percentage=$((completed_steps * 100 / total_steps))
 
-	echo -e "\n\033[38;5;81m┌─────────────────────────────────────────────┐\033[m"
-	echo -e "\033[38;5;81m│\033[m  \033[38;5;198m📊 Progresso:\033[m $completed_steps/$total_steps etapas (\033[38;5;148m${percentage}%\033[m)  \033[38;5;81m│\033[m"
-	echo -e "\033[38;5;81m└─────────────────────────────────────────────┘\033[m\n"
+	echo ""
+	echo -e "   \033[38;5;240m[\033[m\033[38;5;81m$completed_steps\033[38;5;240m/\033[m\033[38;5;81m$total_steps\033[38;5;240m]\033[m \033[38;5;148m${percentage}% completo\033[m"
+	echo ""
 }
 
 # Faz merge inteligente de resultados (adiciona apenas novos)
@@ -288,11 +303,7 @@ wafDetect() {
 			wafw00f -i $1 -a -o $OUTFOLDER/subdomains/waf.txt > /dev/null
 			echo " ✅"
 		else
-			printf "\n\033[38;5;198m"
-		printf "\t╔════════════════════════════════════════════════╗\n"
-		printf "\t║  🛡️  DETECÇÃO WAF - Identificando Firewalls  ║\n"
-		printf "\t╚════════════════════════════════════════════════╝\n"
-			printf "\033[m\n"
+			show_step_banner "🛡️" "DETECÇÃO WAF - Identificando Firewalls" "198"
 			wafw00f -i $1 -a -o $OUTFOLDER/subdomains/waf.txt
 		fi
 	fi
@@ -346,11 +357,7 @@ asnEnum() {
 	rm -f $output_folder/$org.txt.new
 
 	if [ "$QUIET" != "True" ]; then
-		printf "\n\033[38;5;198m"
-		printf "\t╔════════════════════════════════════════════════╗\n"
-		printf "\t║  🔍  ENUMERAÇÃO ASN - Mapeando Redes  🔍     ║\n"
-		printf "\t╚════════════════════════════════════════════════╝\n"
-		printf "\033[m\n"
+		show_step_banner "🔍" "ENUMERAÇÃO ASN - Mapeando Redes" "198"
 		ASSUME_NO_MOVING_GC_UNSAFE_RISK_IT_WITH=go1.25 echo $org | metabigor net --org -o $output_folder/$org.txt.new 2>/dev/null
 	else
 		echo -e -n "\n\033[38;5;81m[+] Enumeração ASN 🔎\033[m"
@@ -394,12 +401,8 @@ checkActive() {
 		rm -f $output_folder/alive.txt.new
 
 		if [ "$QUIET" != "True" ]; then
-			printf "\n\033[38;5;148m"
-			printf "\t╔════════════════════════════════════════════════╗\n"
-			printf "\t║  ✅  TESTANDO DOMÍNIOS - Verificando Ativos  ║\n"
-			printf "\t╚════════════════════════════════════════════════╝\n"
-			printf "\033[m\n"
-			echo -e "\033[38;5;208m[!] LIVE FEED: Novos domínios ativos aparecerão abaixo em tempo real!\033[m"
+			show_step_banner "✅" "TESTANDO DOMÍNIOS - Verificando Ativos" "148"
+			echo -e "   \033[38;5;208m⚡ LIVE FEED:\033[m Novos domínios ativos aparecerão em tempo real\n"
 			cat $subdomains | httprobe | while read line; do echo -e "\033[38;5;46m[NEW] $line\033[m"; echo "$line" >> $output_folder/alive.txt.new; done
 			cat $subdomains | httpx --silent --threads 300 | while read line; do echo -e "\033[38;5;46m[NEW] $line\033[m"; echo "$line" >> $output_folder/alive.txt.new; done
 		else
@@ -409,7 +412,7 @@ checkActive() {
 		fi
 
 		# Limpa e remove duplicatas dos novos resultados
-		sort -u $output_folder/alive.txt.new -o $output_folder/alive.txt.new
+		grep "$domain" $output_folder/alive.txt.new | sort -u -o $output_folder/alive.txt.new
 
 		# Merge inteligente com arquivo existente
 		if [ -f "$output_folder/alive.txt" ]; then
@@ -445,12 +448,8 @@ subdomainEnumeration() {
 		rm -f $output_folder/subdomains.txt.new
 
 		if [ "$QUIET" != "True" ]; then
-			printf "\n\033[38;5;81m"
-			printf "\t╔═══════════════════════════════════════════════════╗\n"
-			printf "\t║  🎯  ENUMERAÇÃO DE SUBDOMÍNIOS - Multi-Tool  🎯  ║\n"
-			printf "\t╚═══════════════════════════════════════════════════╝\n"
-			printf "\033[m\n"
-			echo -e "\033[38;5;228m[!] Todos os subdomínios serão salvos em \033[38;5;198m$output_folder/subdomains.txt\033[m"
+			show_step_banner "🎯" "ENUMERAÇÃO DE SUBDOMÍNIOS - Multi-Tool" "81"
+			echo -e "   \033[38;5;240m→\033[m Salvando em: \033[38;5;198m$output_folder/subdomains.txt\033[m\n"
 			echo -e "\033[38;5;81m>>>\033[38;5;141m Executando assetfinder 🔍\033[m"
 			assetfinder $target | tee -a $output_folder/subdomains.txt.new || $GOPATH/bin/assetfinder $target | tee -a $output_folder/subdomains.txt.new
 			echo -e "\n\033[38;5;81m>>>\033[38;5;141m Executando subfinder 🔍\033[m"
@@ -463,10 +462,10 @@ subdomainEnumeration() {
 			sublist3r -d $target -o $SCRIPTPATH/sublist3r-$domain.txt
 			[ -f "$SCRIPTPATH/sublist3r-$domain.txt" ] && cat $SCRIPTPATH/sublist3r-$domain.txt >> $output_folder/subdomains.txt.new
 			[ -f "$SCRIPTPATH/sublist3r-$domain.txt" ] && rm $SCRIPTPATH/sublist3r-$domain.txt
-			knockpy -d $target -w $wordlist --save $output_folder/knockpy/ -t 5
+			knockpy -d $target --wordlist $wordlist --save $output_folder/knockpy/ --threads 5
 			if [ "$GHAPIKEY" != "False" ]; then
 				echo -e "\n\033[38;5;81m>>>\033[38;5;141m Executando Github-Subdomains 🔍\033[m"
-				python3 $SCRIPTPATH/tools/github-search/github-subdomains.py -t $GHAPIKEY -d $target | tee -a $output_folder/subdomains.txt.new
+				$SCRIPTPATH/.venv/bin/python3 $SCRIPTPATH/tools/github-search/github-subdomains.py -t $GHAPIKEY -d $target | tee -a $output_folder/subdomains.txt.new
 			fi
 		else
 			echo -e "\n\033[38;5;81m[+] Enumeração de Subdomínios 🔎\033[m"
@@ -490,12 +489,12 @@ subdomainEnumeration() {
 			[ -f "$SCRIPTPATH/temp.txt" ] && rm $SCRIPTPATH/temp.txt
 			echo " ✅"
 			echo -e -n "\n\033[38;5;81m>>>\033[38;5;141m Executando Knockpy 🔍\033[m"
-			knockpy -d $target -w $wordlist -o $output_folder/knockpy/ -t 5 > $SCRIPTPATH/knocktemp
+			knockpy -d $target --wordlist $wordlist --save $output_folder/knockpy/ --threads 5 > $SCRIPTPATH/knocktemp
 			[ -f "$SCRIPTPATH/knocktemp" ] && rm $SCRIPTPATH/knocktemp
 			echo " ✅"
 			if [ "$GHAPIKEY" != "False" ]; then
 				echo -e -n "\033[38;5;81m>>>\033[38;5;141m Executando Github-Subdomains 🔍\033[m"
-				python3 $SCRIPTPATH/tools/github-search/github-subdomains.py -t $GHAPIKEY -d $target >> $output_folder/subdomains.txt.new
+				$SCRIPTPATH/.venv/bin/python3 $SCRIPTPATH/tools/github-search/github-subdomains.py -t $GHAPIKEY -d $target >> $output_folder/subdomains.txt.new
 				echo " ✅"
 			fi
 		fi
@@ -507,8 +506,8 @@ subdomainEnumeration() {
 		#cat $SCRIPTPATH/knock.txt >> $output_folder/subdomains.txt.new
 		#rm $SCRIPTPATH/knock.txt
 
-		# Limpa resultados novos (remove wildcards e erros)
-		cat $output_folder/subdomains.txt.new 2>/dev/null | grep -v "\*" | grep -v "error occurred" | sort -u > $SCRIPTPATH/temporary_clean.txt
+		# Limpa resultados novos (remove wildcards, erros e emails)
+		cat $output_folder/subdomains.txt.new 2>/dev/null | grep -v "\*" | grep -v "error occurred" | grep -v "@" | grep "$target" | sort -u > $SCRIPTPATH/temporary_clean.txt
 
 		# Faz merge inteligente com resultados anteriores (se existirem)
 		if [ -f "$output_folder/subdomains.txt" ]; then
@@ -547,11 +546,7 @@ subdomainTakeover() {
 	if [ "$(cat $list | wc -l)" -ge "1" ]; then
 		[[ ! -d $output_folder ]] && mkdir $output_folder
 		if [ "$QUIET" != "True" ]; then
-			printf "\n\033[38;5;208m"
-			printf "\t╔════════════════════════════════════════════════╗\n"
-			printf "\t║  ⚠️  SUBDOMAIN TAKEOVER - Caça a Vulneráveis ║\n"
-			printf "\t╚════════════════════════════════════════════════╝\n"
-			printf "\033[m\n"
+			show_step_banner "⚠️" "SUBDOMAIN TAKEOVER - Caça a Vulneráveis" "208"
 		else
 			echo -e "\n\033[38;5;81m[+] Subdomain Takeover 🔎\033[m"
 		fi
@@ -572,11 +567,7 @@ dnsLookup() {
 	[[ ! -d $output_folder/DNS ]] && mkdir $output_folder/DNS
 	if [ "$(cat $domains | wc -l)" -ge "1" ]; then
 		if [ "$QUIET" != "True" ]; then
-			printf "\n\033[38;5;141m"
-			printf "\t╔════════════════════════════════════════════════╗\n"
-			printf "\t║  🌐  DNS LOOKUP - Resolução e Enumeração  🌐  ║\n"
-			printf "\t╚════════════════════════════════════════════════╝\n"
-			printf "\033[m\n"
+			show_step_banner "🌐" "DNS LOOKUP - Resolução e Enumeração" "141"
 			echo -e "\033[38;5;81m>>>\033[38;5;141m Descobrindo IPs 🔍\033[38;5;148m"
 			dnsx --silent -l $domains -resp -o $output_folder/DNS/dns.txt || $GOPATH/bin/dnsx -l $DOMAINS -resp -o $output_folder/DNS/dns.txt
 			echo -e "\033[m"
@@ -614,15 +605,11 @@ favAnalysis() {
 		[[ ! -d $output_folder ]] && mkdir $output_folder
 		[[ ! -d $FAVOUT ]] && mkdir $FAVOUT
 		if [ "$QUIET" != "True" ]; then
-			printf "\n\033[38;5;198m"
-			printf "\t╔════════════════════════════════════════════════╗\n"
-			printf "\t║  🎨  ANÁLISE FAVICON - Hash Fingerprinting   ║\n"
-			printf "\t╚════════════════════════════════════════════════╝\n"
-			printf "\033[m\n"
-			cat $alive_domains | python3 $SCRIPTPATH/tools/FavFreak/favfreak.py --shodan -o $FAVOUT
+			show_step_banner "🎨" "ANÁLISE FAVICON - Hash Fingerprinting" "198"
+			cat $alive_domains | $SCRIPTPATH/.venv/bin/python3 $SCRIPTPATH/tools/FavFreak/favfreak.py --shodan -o $FAVOUT
 		else
 			echo -e "\n\033[38;5;81m[+] Análise Favicon 🔎\033[m"
-			cat $alive_domains | python3 $SCRIPTPATH/tools/FavFreak/favfreak.py --shodan -o $FAVOUT > $SCRIPTPATH/tmpfavfreak
+			cat $alive_domains | $SCRIPTPATH/.venv/bin/python3 $SCRIPTPATH/tools/FavFreak/favfreak.py --shodan -o $FAVOUT > $SCRIPTPATH/tmpfavfreak
 			rm $SCRIPTPATH/tmpfavfreak
 		fi
 		echo -e "\033[38;5;81m>>>\033[38;5;141m Todos os hashes salvos em \033[38;5;198m$output_folder/favfreak/*.txt\033[m"
@@ -645,7 +632,7 @@ favAnalysis() {
 			fi
 		done
 		if [ -e $output_folder/shodan-results.txt ]; then
-			if [ "$(cat $output_folder/shodan-results.txt) | wc -l" == "0" ]; then
+			if [ "$(cat $output_folder/shodan-results.txt | wc -l)" == "0" ]; then
 				rm $output_folder/shodan-results.txt
 			fi
 		fi
@@ -658,11 +645,7 @@ dirFuzz() {
 	output_folder_fuzz="$2"
 	if [ "$(cat $alive_domains_fuzz | wc -l)" -ge "1" ];then
 		if [ "$QUIET" != "True" ]; then
-			printf "\n\033[38;5;198m"
-			printf "\t╔════════════════════════════════════════════════╗\n"
-			printf "\t║  📁  FUZZING DE DIRETÓRIOS - Brute Force     ║\n"
-			printf "\t╚════════════════════════════════════════════════╝\n"
-			printf "\033[m\n"
+			show_step_banner "📁" "FUZZING DE DIRETÓRIOS - Brute Force" "198"
 		else
 			echo -e "\n\033[38;5;81m[+] Fuzzing de Diretórios 🔎\033[m"
 		fi
@@ -680,11 +663,7 @@ googleHacking() {
 	output_folder_googledorks="$1"
 	if [ -n $output_folder_googledorks ]; then
 		if [ "$QUIET" != "True" ]; then
-			printf "\n\033[38;5;198m"
-			printf "\t╔════════════════════════════════════════════════╗\n"
-			printf "\t║  🔍  GOOGLE DORKS - Gerando Consultas        ║\n"
-			printf "\t╚════════════════════════════════════════════════╝\n"
-			printf "\033[m\n"
+			show_step_banner "🔍" "GOOGLE DORKS - Gerando Consultas" "198"
 		else
 			echo -e "\n\033[1;36m[+] Dorks Google 🔎\033[m"
 		fi
@@ -737,11 +716,7 @@ googleHacking() {
 ghDork() {
 	out_ghdork="$1"
 	if [ "$QUIET" != "True" ]; then
-		printf "\n\033[1;32m"
-		printf "\t╔════════════════════════════════════════════════╗\n"
-		printf "\t║  💻  GITHUB DORKS - Buscando Secrets          ║\n"
-		printf "\t╚════════════════════════════════════════════════╝\n"
-		printf "\033[m\n"
+		show_step_banner "💻" "GITHUB DORKS - Buscando Secrets" "148"
 	else
 		echo -e "\n\033[1;36m[+] Dorks GitHub 🔎\033[m"
 	fi
@@ -864,11 +839,7 @@ credStuff() {
 	[[ ! -d $output_folder/credstuff ]] && mkdir $output_folder/credstuff
 	if [ "$domain" != "" ]; then
 		if [ "$QUIET" != "True" ]; then
-			printf "\n\033[1;32m"
-			printf "\t╔════════════════════════════════════════════════╗\n"
-			printf "\t║  🔐  CREDENTIAL STUFFING - Hunting Leaks     ║\n"
-			printf "\t╚════════════════════════════════════════════════╝\n"
-			printf "\033[m\n"
+			show_step_banner "🔐" "CREDENTIAL STUFFING - Hunting Leaks" "148"
 			$SCRIPTPATH/tools/CredStuff-Auxiliary/CredStuff_Auxiliary/main.sh $domain $1 | tee -a $output_folder/credstuff/credstuff.txt
 		else
 			echo -e "\n\033[1;36m[+] Cred Stuff 🔎\033[m"
@@ -884,16 +855,12 @@ screenshots() {
 	if [ -r $alive_domains_screenshots ]; then
 		if [ "$(cat $alive_domains_screenshots | wc -l)" -ge "1" ]; then
 			if [ "$QUIET" != "True" ]; then
-				printf "\n\033[1;32m"
-				printf "\t╔════════════════════════════════════════════════╗\n"
-				printf "\t║  📸  SCREENSHOTS - Capturando Páginas         ║\n"
-				printf "\t╚════════════════════════════════════════════════╝\n"
-				printf "\033[m\n"
+				show_step_banner "📸" "SCREENSHOTS - Capturando Páginas" "148"
 			else
 				echo -e "\n\033[1;36m[+] Screenshots 🔎\033[m"
 			fi
 			# Executar EyeWitness com tratamento de erros (timeouts de Chrome são esperados)
-			python3 $SCRIPTPATH/tools/EyeWitness/Python/EyeWitness.py --web --no-prompt -f $alive_domains_screenshots -d $out_screenshots --selenium-log-path $out_screenshots/selenium-log.txt --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.169 Safari/537.36" 2>&1 | grep -v "Chrome WebDriver initialization error" | grep -v "Timed out receiving message from renderer" | grep -v "Stacktrace:" | grep -v "^#[0-9]" || true
+			$SCRIPTPATH/.venv/bin/python3 $SCRIPTPATH/tools/EyeWitness/Python/EyeWitness.py --web --no-prompt -f $alive_domains_screenshots -d $out_screenshots --selenium-log-path $out_screenshots/selenium-log.txt --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.169 Safari/537.36" 2>&1 | grep -v "Chrome WebDriver initialization error" | grep -v "Timed out receiving message from renderer" | grep -v "Stacktrace:" | grep -v "^#[0-9]" || true
 			echo -e "\033[38;5;148m[+] Screenshots concluídos (erros de timeout são normais e não afetam resultados)\033[m"
 		fi
 	fi
@@ -905,13 +872,9 @@ portscan() {
 	ips="$2"
 	output_folder="$3"
 	if [ "$(cat $portscan_domains | wc -l)" -ge "1" ] && [ "$(cat $ips | wc -l)" -ge "1" ]; then
-		[[ ! -d $Ooutput_folder ]] && mkdir $output_folder 2>/dev/null
+		[[ ! -d $output_folder ]] && mkdir $output_folder 2>/dev/null
 		if [ "$QUIET" != "True" ]; then
-			printf "\n\033[1;32m"
-			printf "\t╔════════════════════════════════════════════════╗\n"
-			printf "\t║  🔌  PORT SCAN - Mapeando Serviços            ║\n"
-			printf "\t╚════════════════════════════════════════════════╝\n"
-			printf "\033[m\n"
+			show_step_banner "🔌" "PORT SCAN - Mapeando Serviços" "148"
 			echo -e "\n\033[36m>>>\033[35m Executando Nmap 🔍\033[m\n"
 			nmap -iL $portscan_domains --top-ports 5000 --max-rate=50000 -oG $output_folder/nmap.txt
 			echo -e "\n\033[36m>>>\033[35m Executando Masscan 🔍\033[m\n"
@@ -942,11 +905,7 @@ linkDiscovery() {
     # Verifica se o arquivo tem conteúdo
     if [ "$(cat "$alive_domains" | wc -l)" -ge "1" ]; then
         if [ "$QUIET" != "True" ]; then
-            printf "\n\033[38;5;228m"
-            printf "\t╔═════════════════════════════════════════════════╗\n"
-            printf "\t║  🔗  DESCOBERTA DE LINKS - Crawling URLs  🔗   ║\n"
-            printf "\t╚═════════════════════════════════════════════════╝\n"
-            printf "\033[m\n"
+            show_step_banner "🔗" "DESCOBERTA DE LINKS - Crawling URLs" "228"
         else
             echo -e -n "\n\033[1;36m[+] Descoberta de Links 🔎\033[m"
         fi
@@ -973,7 +932,7 @@ linkDiscovery() {
         cat "$output_folder/hakrawler/"*.txt | cut -d "]" -f2- | sed -e 's/^[ \t]*//' >> "$output_folder/all.txt"
         cat "$output_folder/waybackurls/"*.txt | sed -e 's/^[ \t]*//' >> "$output_folder/all.txt"
         
-        sort -u "$output_folder/all.txt" -o "$output_folder/all.txt"
+        cat "$output_folder/all.txt" | grep "$domain" | sort -u -o "$output_folder/all.txt"
 
         if [ "$QUIET" == "True" ]; then
             echo " ✅"
@@ -991,28 +950,25 @@ endpointsEnumeration() {
 	echo "Dominios:\n$1"
 	if [ "$(cat $alive_domains | wc -l)" -ge "1" ]; then
 		if [ "$QUIET" != "True" ]; then
-			printf "\n\033[38;5;141m"
-			printf "\t╔═══════════════════════════════════════════════════╗\n"
-			printf "\t║  📡  ENUMERAÇÃO DE ENDPOINTS - Caça a Parâmetros ║\n"
-			printf "\t╚═══════════════════════════════════════════════════╝\n"
-			printf "\033[m\n"
+			show_step_banner "📡" "ENUMERAÇÃO DE ENDPOINTS - Caça a Parâmetros" "141"
 		else
 			echo -e "\n\033[1;36m[+] Enumeração de Endpoints 🔎\033[m"
 		fi
 		if [ "$QUIET" != "True" ]; then
 			echo -e "\n\033[36m>>>\033[35m Extracting URLs 🔍\033[m"
-			xargs -a $alive_domains -I@ bash -c "$SCRIPTPATH/.venv/bin/paramspider -d @ -s 2>/dev/null" >> $output_folder/all.txt
+		mkdir -p $output_folder/results
+			xargs -a $alive_domains -I@ bash -c "cd $output_folder && $SCRIPTPATH/.venv/bin/paramspider -d @ -s 2>/dev/null" >> $output_folder/all.txt
 		else
 			echo -e -n "\n\033[36m>>>\033[35m Extracting URLs 🔍\033[m"
-			xargs -a $alive_domains -I@ bash -c "$SCRIPTPATH/.venv/bin/paramspider -d @ -s 2>/dev/null" >> $output_folder/all.txt
+			xargs -a $alive_domains -I@ bash -c "cd $output_folder && $SCRIPTPATH/.venv/bin/paramspider -d @ -s 2>/dev/null" >> $output_folder/all.txt
 			echo " ✅"
 		fi
-		sort -u $output_folder/all.txt -o $output_folder/all.txt
+		cat $output_folder/all.txt | grep "$domain" | sort -u -o $output_folder/all.txt
 		[[ ! -d $output_folder/js ]] && mkdir $output_folder/js
 		echo -e "\n\033[36m>>>\033[35m Enumerating Javascript files 🔍\033[m"
 		xargs -P 500 -a $DOMAINS -I@ bash -c 'nc -w1 -z -v @ 443 2>/dev/null && echo @' | xargs -I@ -P10 bash -c 'gospider -a -s "https://@" -d 2 | grep -Eo "(http|https)://[^/\"].*\.js+" | sed "s#\] \- #\n#g" | anew' | grep -Eo "(http|https)://[^/\"].*\.js+" >> $output_folder/js/js.txt
 		cat $alive_domains | waybackurls | grep -iE '\.js' | grep -iEv '(\.jsp|\.json)' >> $output_folder/js/js.txt
-		sort -u $output_folder/js/js.txt -o $output_folder/js/js.txt
+		cat $output_folder/js/js.txt | grep "$domain" | sort -u -o $output_folder/js/js.txt
 		jslen="$(cat $output_folder/js/js.txt | wc -l)"
 		echo -e "\033[32m[+] Encontrados \033[31m$jslen\033[32m JS files\033[m"
 		cat $output_folder/js/js.txt | anti-burl | awk '{print $4}' | sort -u >> $output_folder/js/AliveJS.txt
@@ -1028,11 +984,7 @@ findVuln() {
 	output_folder="$2"
 	if [ "$(cat $alive_domains | wc -l)" -ge "1" ]; then
 		if [ "$QUIET" != "True" ]; then
-			printf "\n\033[38;5;198m"
-			printf "\t╔══════════════════════════════════════════════════╗\n"
-			printf "\t║  🔥  SCAN DE VULNERABILIDADES - Hunting Bugs 🔥 ║\n"
-			printf "\t╚══════════════════════════════════════════════════╝\n"
-			printf "\033[m\n"
+			show_step_banner "🔥" "SCAN DE VULNERABILIDADES - Hunting Bugs" "198"
 		else
 			echo -e "\n\033[1;36m[+] Vulnerabilidades 🔎\033[m"
 		fi
@@ -1045,10 +997,10 @@ findVuln() {
 		[[ ! -d $output_folder/xss-discovery ]] && mkdir $output_folder/xss-discovery 2>/dev/null
 		if [ "$QUIET" != "True" ]; then
 			echo -e "\n\033[36m>>>\033[34m Finding XSS with Gxss🤖\033[m"
-			cat $OUTFOLDER/link-discovery/all.txt | anti-burl | awk '{print $4}' | Gxss -p XSS | sed '/^$/d' | tee -a $output_folder/xss-discovery/temppossíveis-xss.txt
+			cat $OUTFOLDER/link-discovery/all.txt | anti-burl | awk '{print $4}' | grep -E "^https?://" | Gxss -p XSS 2>/dev/null | sed '/^$/d' | tee -a $output_folder/xss-discovery/temppossíveis-xss.txt
 		else
 			echo -e -n "\n\033[36m>>>\033[34m Finding XSS with Gxss🤖\033[m"
-			cat $OUTFOLDER/link-discovery/all.txt | anti-burl | awk '{print $4}' | Gxss -p XSS >> $output_folder/xss-discovery/temppossíveis-xss.txt
+			cat $OUTFOLDER/link-discovery/all.txt | anti-burl | awk '{print $4}' | grep -E "^https?://" | Gxss -p XSS 2>/dev/null >> $output_folder/xss-discovery/temppossíveis-xss.txt
 			echo " ✅"
 		fi
 		sed '/^$/d' $output_folder/xss-discovery/temppossíveis-xss.txt > $output_folder/xss-discovery/possíveis-xss.txt
@@ -1070,7 +1022,7 @@ findVuln() {
 	if [ "$FUZZ" == "True" ]; then
 		for a in $(cat $output_folder/xss-discovery/possíveis-xss.txt); do
 			echo -e "\033[32m[+] Fuzzing $a\033[m"
-			python3 $SCRIPTPATH/tools/XSStrike/xsstrike.py -u $a
+			$SCRIPTPATH/.venv/bin/python3 $SCRIPTPATH/tools/XSStrike/xsstrike.py -u $a
 		done
 		echo -e "\n\033[36m>>>\033[34m Finding XSS with Dalfox🤖\033[m"
 		gospider -S $OUTFOLDER/subdomains/alive.txt -c 10 -d 5 --blacklist ".(jpg|jpeg|gif|css|tif|tiff|png|ttf|woff|woff2|ico|pdf|svg|txt)" --other-source | grep -e "code-200" | awk '{print $5}'| grep "=" | qsreplace -a | dalfox pipe --skip-bav --silence | tee -a $output_folder/xss-discovery/xss.txt
@@ -1153,7 +1105,7 @@ if [ "$1" == "--help" ] || [ "$1" == "-h" ]; then
 	exit
 fi
 
-while getopts ":d:w:t:g:s:q:o:f:" ops; do
+while getopts ":d:w:t:g:s:q:o:f:D:P:" ops; do
 	case "${ops}" in
 		d)
 			domain=${OPTARG}
@@ -1178,6 +1130,10 @@ while getopts ":d:w:t:g:s:q:o:f:" ops; do
 				QUIET="True"
 			elif [ "${OPTARG}" == "f" ]; then
 				FUZZ="True"
+			elif [ "${OPTARG}" == "D" ]; then
+				DIRFUZZ="True"
+			elif [ "${OPTARG}" == "P" ]; then
+				PORTSCAN="True"
 			else
 				echo -e "\033[1;31m[-] Error: -${OPTARG} requires an argument!\033[m"
 				exit
@@ -1288,17 +1244,19 @@ run_step "subdomain_enum" subdomainEnumeration $domain $OUTFOLDER/subdomains
 
 run_step "organize_domains" organizeDomains $DOMAINS $OUTFOLDER/subdomains
 
-run_step "subdomain_takeover" subdomainTakeover $DOMAINS $OUTFOLDER/subdomains/subdomain-takeover
-
 run_step "dns_lookup" dnsLookup $DOMAINS $OUTFOLDER
 
 run_step "check_active" checkActive $DOMAINS $OUTFOLDER/subdomains
 
 run_step "waf_detect" wafDetect $OUTFOLDER/subdomains/alive.txt
 
+run_step "subdomain_takeover" subdomainTakeover $DOMAINS $OUTFOLDER/subdomains/subdomain-takeover
+
 run_step "favicon_analysis" favAnalysis $OUTFOLDER/subdomains/alive.txt $OUTFOLDER/favicon-analysis
 
-#run_step "directory_fuzzing" dirFuzz $OUTFOLDER/subdomains/alive.txt $OUTFOLDER/fuzz
+if [ "$DIRFUZZ" == "True" ]; then
+	run_step "directory_fuzzing" dirFuzz $OUTFOLDER/subdomains/alive.txt $OUTFOLDER/fuzz
+fi
 
 run_step "cred_stuff" credStuff 500 $OUTFOLDER/dorks
 
@@ -1308,7 +1266,9 @@ run_step "github_dorks" ghDork $OUTFOLDER/dorks/github-dorks
 
 run_step "screenshots" screenshots $OUTFOLDER/subdomains/alive.txt $OUTFOLDER/$domain-screenshots
 
-#run_step "port_scanning" portscan $DOMAINS $OUTFOLDER/DNS/ip_only.txt $OUTFOLDER/portscan/
+if [ "$PORTSCAN" == "True" ]; then
+	run_step "port_scanning" portscan $DOMAINS $OUTFOLDER/DNS/ip_only.txt $OUTFOLDER/portscan/
+fi
 
 run_step "link_discovery" linkDiscovery $OUTFOLDER/subdomains/alive.txt $OUTFOLDER/link-discovery
 
@@ -1322,25 +1282,25 @@ if [ -e $OUTFOLDER/asn/$org.txt ]; then
 else
 	asn="0"
 fi
-subsfound="$(cat $DOMAINS | wc -l)"
-subsalive="$(cat $OUTFOLDER/subdomains/alive.txt | wc -l)"
-if [ -e $OUTFOLDER/subdomains.txt/takeover.txt ]; then
-	takeofound="$(cat $OUTFOLDER/subdomains.txt/takeover.txt | wc -l)"
+subsfound="$([ -f "$DOMAINS" ] && cat $DOMAINS | wc -l || echo 0)"
+subsalive="$([ -f "$OUTFOLDER/subdomains/alive.txt" ] && cat $OUTFOLDER/subdomains/alive.txt | wc -l || echo 0)"
+if [ -e $OUTFOLDER/subdomains/subdomain-takeover/takeover.txt ]; then
+	takeofound="$(cat $OUTFOLDER/subdomains/subdomain-takeover/takeover.txt | wc -l)"
 fi
-ips="$(cat $OUTFOLDER/DNS/ip_only.txt | wc -l)"
-favfound="$(cat $OUTFOLDER/favicon-analysis/favfreak/*.txt | wc -l)"
-fuzzdir="$(ls $OUTFOLDER/fuzz | wc -l)"
-fuzzdirfound="$(cat $OUTFOLDER/fuzz/* | wc -l)"
-jsfound="$(cat $OUTFOLDER/link-discovery/js/js.txt | wc -l)"
-jsalive="$(cat $OUTFOLDER/link-discovery/js/AliveJS.txt | wc -l)"
-lfound="$(cat $OUTFOLDER/link-discovery/all.txt | wc -l)"
-foundvuln="$(($(cat $OUTFOLDER/vuln/* 2>/dev/null | wc -l)+$(cat $OUTFOLDER/vuln/xss-discovery/* | wc -l)))"
+ips="$([ -f "$OUTFOLDER/DNS/ip_only.txt" ] && cat $OUTFOLDER/DNS/ip_only.txt | wc -l || echo 0)"
+favfound="$([ -d "$OUTFOLDER/favicon-analysis/favfreak" ] && cat $OUTFOLDER/favicon-analysis/favfreak/*.txt 2>/dev/null | wc -l || echo 0)"
+fuzzdir="$([ -d "$OUTFOLDER/fuzz" ] && ls $OUTFOLDER/fuzz 2>/dev/null | wc -l || echo 0)"
+fuzzdirfound="$([ -d "$OUTFOLDER/fuzz" ] && cat $OUTFOLDER/fuzz/* 2>/dev/null | wc -l || echo 0)"
+jsfound="$([ -f "$OUTFOLDER/link-discovery/js/js.txt" ] && cat $OUTFOLDER/link-discovery/js/js.txt | wc -l || echo 0)"
+jsalive="$([ -f "$OUTFOLDER/link-discovery/js/AliveJS.txt" ] && cat $OUTFOLDER/link-discovery/js/AliveJS.txt | wc -l || echo 0)"
+lfound="$([ -f "$OUTFOLDER/link-discovery/all.txt" ] && cat $OUTFOLDER/link-discovery/all.txt | wc -l || echo 0)"
+foundvuln="$(($([ -d "$OUTFOLDER/vuln" ] && cat $OUTFOLDER/vuln/* 2>/dev/null | wc -l || echo 0)+$([ -d "$OUTFOLDER/vuln/xss-discovery" ] && cat $OUTFOLDER/vuln/xss-discovery/* 2>/dev/null | wc -l || echo 0)))"
 echo -e "\033[38;5;198m====================================================================================================================\033[m"
 echo -e "\033[38;5;198m====================\033[38;5;148m Resultados Finais \033[38;5;198m====================\033[m"
 echo -e "\033[38;5;148m[+] ASNs Encontrados: \033[38;5;198m$asn\033[m"
 echo -e "\033[38;5;148m[+] Subdomínios Encontrados: \033[38;5;198m$subsfound\033[m"
 echo -e "\033[38;5;148m[+] Subdomínios Ativos Encontrados: \033[38;5;198m$subsalive\033[m"
-if [ -e $OUTFOLDER/subdomains.txt/takeover.txt ] && [ "$(cat $OUTFOLDER/subdomains.txt/takeover.txt | wc -l)" -ge "1" ]; then
+if [ -e $OUTFOLDER/subdomains/subdomain-takeover/takeover.txt ] && [ "$(cat $OUTFOLDER/subdomains/subdomain-takeover/takeover.txt | wc -l)" -ge "1" ]; then
 	echo -e "\033[38;5;148m[+] Subdomain Takeover Encontrados: \033[38;5;198m$takeofound\033[m"
 else
 	echo -e "\033[38;5;148m[+] Subdomain Takeover Encontrados: \033[38;5;198m0\033[m"
