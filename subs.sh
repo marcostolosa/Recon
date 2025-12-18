@@ -141,6 +141,18 @@ PIPELINE_STEPS=(
 	"vulnerability_scan"
 )
 
+# Etapas que SEMPRE devem executar (discovery de novos alvos)
+ALWAYS_RUN_STEPS=(
+	"asn_enum"
+	"subdomain_enum"
+	"check_active"
+	"link_discovery"
+	"endpoints_enum"
+)
+
+# Variável global para rastrear se novos alvos foram encontrados
+NEW_TARGETS_FOUND=0
+
 # Inicializa arquivo de checkpoint
 init_checkpoint() {
 	local checkpoint_file="$OUTFOLDER/.checkpoint"
@@ -232,13 +244,24 @@ merge_results() {
 	local target_file="$2"
 
 	if [ ! -f "$new_file" ]; then
+		echo "0"  # Retorna 0 novos itens
 		return
 	fi
 
+	local old_count=0
+	local new_count=0
+	local added=0
+
 	if [ ! -f "$target_file" ]; then
-		# Se arquivo alvo não existe, apenas move o novo
+		# Se arquivo alvo não existe, todos são novos
 		mv "$new_file" "$target_file"
+		new_count=$(cat "$target_file" 2>/dev/null | wc -l)
+		echo "$new_count"
+		NEW_TARGETS_FOUND=$((NEW_TARGETS_FOUND + new_count))
 	else
+		# Conta items existentes
+		old_count=$(cat "$target_file" 2>/dev/null | wc -l)
+
 		# Faz merge usando anew (adiciona apenas linhas únicas)
 		if command -v anew >/dev/null 2>&1; then
 			cat "$new_file" | anew "$target_file" > /dev/null
@@ -249,6 +272,13 @@ merge_results() {
 			mv "${target_file}.tmp" "$target_file"
 			rm -f "$new_file"
 		fi
+
+		# Conta novos items
+		new_count=$(cat "$target_file" 2>/dev/null | wc -l)
+		added=$((new_count - old_count))
+
+		echo "$added"
+		NEW_TARGETS_FOUND=$((NEW_TARGETS_FOUND + added))
 	fi
 }
 
@@ -259,12 +289,29 @@ run_step() {
 	shift 2
 	local step_args="$@"
 
+	# Verifica se é uma etapa de discovery (sempre executar)
+	local is_always_run=false
+	for always_step in "${ALWAYS_RUN_STEPS[@]}"; do
+		if [ "$step_name" == "$always_step" ]; then
+			is_always_run=true
+			break
+		fi
+	done
+
 	# Verifica se etapa já foi completa
 	if check_step "$step_name"; then
-		if [ "$QUIET" != "True" ]; then
-			echo -e "\033[38;5;228m[⏭️ ] Etapa '$step_name' já completa, pulando...\033[m"
+		if [ "$is_always_run" == "true" ]; then
+			# Etapa de discovery: sempre re-executar para buscar novos alvos
+			if [ "$QUIET" != "True" ]; then
+				echo -e "\033[38;5;148m[RE-SCAN] Re-executando '$step_name' para buscar novos alvos...\033[m"
+			fi
+		else
+			# Etapa normal: pular se já completa
+			if [ "$QUIET" != "True" ]; then
+				echo -e "\033[38;5;228m[SKIP] Etapa '$step_name' já completa, pulando...\033[m"
+			fi
+			return 0
 		fi
-		return 0
 	fi
 
 	# Marca como em progresso
@@ -403,8 +450,27 @@ checkActive() {
 		if [ "$QUIET" != "True" ]; then
 			show_step_banner "✅" "TESTANDO DOMÍNIOS - Verificando Ativos" "148"
 			echo -e "   \033[38;5;208m⚡ LIVE FEED:\033[m Novos domínios ativos aparecerão em tempo real\n"
-			cat $subdomains | httprobe | while read line; do echo -e "\033[38;5;46m[NEW] $line\033[m"; echo "$line" >> $output_folder/alive.txt.new; done
-			cat $subdomains | httpx --silent --threads 300 | while read line; do echo -e "\033[38;5;46m[NEW] $line\033[m"; echo "$line" >> $output_folder/alive.txt.new; done
+
+			# Verifica se é primeira execução ou re-scan
+			if [ -f "$output_folder/alive.txt" ]; then
+				# Re-scan: mostrar [NEW] apenas para domínios realmente novos
+				cat $subdomains | httprobe | while read line; do
+					echo "$line" >> $output_folder/alive.txt.new
+					if ! grep -Fxq "$line" "$output_folder/alive.txt" 2>/dev/null; then
+						echo -e "\033[38;5;46m[NEW] $line\033[m"
+					fi
+				done
+				cat $subdomains | httpx --silent --threads 300 | while read line; do
+					echo "$line" >> $output_folder/alive.txt.new
+					if ! grep -Fxq "$line" "$output_folder/alive.txt" 2>/dev/null; then
+						echo -e "\033[38;5;46m[NEW] $line\033[m"
+					fi
+				done
+			else
+				# Primeira execução: todos são novos
+				cat $subdomains | httprobe | while read line; do echo -e "\033[38;5;46m[NEW] $line\033[m"; echo "$line" >> $output_folder/alive.txt.new; done
+				cat $subdomains | httpx --silent --threads 300 | while read line; do echo -e "\033[38;5;46m[NEW] $line\033[m"; echo "$line" >> $output_folder/alive.txt.new; done
+			fi
 		else
 			echo -e "\n\033[38;5;81m[+] Domínios Ativos 🔎\033[m"
 			cat $subdomains | httprobe >> $output_folder/alive.txt.new
@@ -462,7 +528,7 @@ subdomainEnumeration() {
 			sublist3r -d $target -o $SCRIPTPATH/sublist3r-$domain.txt
 			[ -f "$SCRIPTPATH/sublist3r-$domain.txt" ] && cat $SCRIPTPATH/sublist3r-$domain.txt >> $output_folder/subdomains.txt.new
 			[ -f "$SCRIPTPATH/sublist3r-$domain.txt" ] && rm $SCRIPTPATH/sublist3r-$domain.txt
-			knockpy -d $target --wordlist $wordlist --save $output_folder/knockpy/ --threads 5
+			knockpy -d $target --wordlist $wordlist --json --save $output_folder/knockpy/ --threads 5
 			if [ "$GHAPIKEY" != "False" ]; then
 				echo -e "\n\033[38;5;81m>>>\033[38;5;141m Executando Github-Subdomains 🔍\033[m"
 				$SCRIPTPATH/.venv/bin/python3 $SCRIPTPATH/tools/github-search/github-subdomains.py -t $GHAPIKEY -d $target | tee -a $output_folder/subdomains.txt.new
@@ -489,7 +555,7 @@ subdomainEnumeration() {
 			[ -f "$SCRIPTPATH/temp.txt" ] && rm $SCRIPTPATH/temp.txt
 			echo " ✅"
 			echo -e -n "\n\033[38;5;81m>>>\033[38;5;141m Executando Knockpy 🔍\033[m"
-			knockpy -d $target --wordlist $wordlist --save $output_folder/knockpy/ --threads 5 > $SCRIPTPATH/knocktemp
+			knockpy -d $target --wordlist $wordlist --json --save $output_folder/knockpy/ --threads 5 > $SCRIPTPATH/knocktemp
 			[ -f "$SCRIPTPATH/knocktemp" ] && rm $SCRIPTPATH/knocktemp
 			echo " ✅"
 			if [ "$GHAPIKEY" != "False" ]; then
@@ -500,11 +566,13 @@ subdomainEnumeration() {
 		fi
 		[ -f "$SCRIPTPATH/SubDomainizer$domain.txt" ] && cat $SCRIPTPATH/SubDomainizer$domain.txt >> $output_folder/subdomains.txt.new
 		[ -f "$SCRIPTPATH/SubDomainizer$domain.txt" ] && rm $SCRIPTPATH/SubDomainizer$domain.txt
-		#for a in $(ls $output_folder/knockpy/*); do
-		#	python3 $SCRIPTPATH/scripts/knocktofile.py -f $a -o $SCRIPTPATH/knock.txt
-		#done
-		#cat $SCRIPTPATH/knock.txt >> $output_folder/subdomains.txt.new
-		#rm $SCRIPTPATH/knock.txt
+
+		# Processar resultados JSON do knockpy
+		for a in $(ls $output_folder/knockpy/*.json 2>/dev/null); do
+			python3 $SCRIPTPATH/scripts/knocktofile.py -f $a -o $SCRIPTPATH/knock.txt
+		done
+		[ -f "$SCRIPTPATH/knock.txt" ] && cat $SCRIPTPATH/knock.txt >> $output_folder/subdomains.txt.new
+		[ -f "$SCRIPTPATH/knock.txt" ] && rm $SCRIPTPATH/knock.txt
 
 		# Limpa resultados novos (remove wildcards, erros e emails)
 		cat $output_folder/subdomains.txt.new 2>/dev/null | grep -v "\*" | grep -v "error occurred" | grep -v "@" | grep "$target" | sort -u > $SCRIPTPATH/temporary_clean.txt
@@ -658,7 +726,6 @@ dirFuzz() {
 	fi
 }
 
-
 googleHacking() {
 	output_folder_googledorks="$1"
 	if [ -n $output_folder_googledorks ]; then
@@ -711,7 +778,6 @@ googleHacking() {
 		echo "site:$domain filetype:STM STM" >> $output_folder_googledorks/dorks.txt
 	fi
 }
-
 
 ghDork() {
 	out_ghdork="$1"
@@ -831,7 +897,6 @@ ghDork() {
 	echo -e "\033[1;31m[!] Check the Dorks manually!\033[m"
 }
 
-
 credStuff() {
 	len="$1"
 	output_folder="$2"
@@ -912,26 +977,35 @@ linkDiscovery() {
 
         [[ ! -d "$output_folder" ]] && mkdir "$output_folder"
         [[ ! -d "$output_folder/hakrawler" ]] && mkdir "$output_folder/hakrawler" 2>/dev/null
+        [[ ! -d "$output_folder/katana" ]] && mkdir "$output_folder/katana" 2>/dev/null
         [[ ! -d "$output_folder/waybackurls" ]] && mkdir "$output_folder/waybackurls" 2>/dev/null
 
-        for d in $(cat "$alive_domains"); do
-            dnohttps="$(echo $d | cut -d "/" -f3-)"
-            echo "$d" | hakrawler -subs >> "$output_folder/hakrawler/$dnohttps.txt"
+        # Parallel execution para máxima performance (10-50x mais rápido)
+        echo -e "\033[38;5;148m[PERFORMANCE] Executando crawlers em paralelo (20 threads)...\033[m"
 
-            # Tentar waybackurls primeiro, se falhar usar curl direto na API
-            echo "$d" | waybackurls >> "$output_folder/waybackurls/$dnohttps.txt" 2>/dev/null
+        # Hakrawler paralelo
+        cat "$alive_domains" | xargs -P 20 -I@ bash -c 'dnohttps=$(echo @ | cut -d "/" -f3-); echo @ | hakrawler -subs >> "'"$output_folder"'/hakrawler/$dnohttps.txt" 2>/dev/null'
 
-            # Fallback: usar curl direto na API do Wayback Machine
-            if [ ! -s "$output_folder/waybackurls/$dnohttps.txt" ]; then
+        # Katana paralelo
+        cat "$alive_domains" | xargs -P 20 -I@ bash -c 'dnohttps=$(echo @ | cut -d "/" -f3-); echo @ | katana -silent -jc >> "'"$output_folder"'/katana/$dnohttps.txt" 2>/dev/null'
+
+        # Waybackurls paralelo com fallback
+        cat "$alive_domains" | xargs -P 20 -I@ bash -c '
+            dnohttps=$(echo @ | cut -d "/" -f3-)
+            outfile="'"$output_folder"'/waybackurls/$dnohttps.txt"
+            echo @ | waybackurls >> "$outfile" 2>/dev/null
+            if [ ! -s "$outfile" ]; then
                 timestamp=$(date +%s%3N)
                 curl -s "https://web.archive.org/web/timemap/json?url=$dnohttps&matchType=prefix&collapse=urlkey&output=json&fl=original&filter=\!statuscode%3A%5B45%5D..&limit=10000&_=$timestamp" \
-                | jq -r '.[1:][]|.[0]' 2>/dev/null | sort -u >> "$output_folder/waybackurls/$dnohttps.txt"
+                | jq -r ".[1:][]|.[0]" 2>/dev/null | sort -u >> "$outfile"
             fi
-        done
+        '
 
         cat "$output_folder/hakrawler/"*.txt | cut -d "]" -f2- | sed -e 's/^[ \t]*//' >> "$output_folder/all.txt"
+        cat "$output_folder/katana/"*.txt | sed -e 's/^[ \t]*//' >> "$output_folder/all.txt"
         cat "$output_folder/waybackurls/"*.txt | sed -e 's/^[ \t]*//' >> "$output_folder/all.txt"
-        
+
+        # Deduplicação: filtrar por domínio e remover duplicatas
         cat "$output_folder/all.txt" | grep "$domain" | sort -u -o "$output_folder/all.txt"
 
         if [ "$QUIET" == "True" ]; then
@@ -967,7 +1041,10 @@ endpointsEnumeration() {
 		[[ ! -d $output_folder/js ]] && mkdir $output_folder/js
 		echo -e "\n\033[36m>>>\033[35m Enumerating Javascript files 🔍\033[m"
 		xargs -P 500 -a $DOMAINS -I@ bash -c 'nc -w1 -z -v @ 443 2>/dev/null && echo @' | xargs -I@ -P10 bash -c 'gospider -a -s "https://@" -d 2 | grep -Eo "(http|https)://[^/\"].*\.js+" | sed "s#\] \- #\n#g" | anew' | grep -Eo "(http|https)://[^/\"].*\.js+" >> $output_folder/js/js.txt
-		cat $alive_domains | waybackurls | grep -iE '\.js' | grep -iEv '(\.jsp|\.json)' >> $output_folder/js/js.txt
+		cat $alive_domains | sed 's|https\?://||' | cut -d'/' -f1 | sort -u | waybackurls | grep -iE '\.js' | grep -iEv '(\.jsp|\.json)' >> $output_folder/js/js.txt
+		xargs -a $alive_domains -I@ bash -c 'getJS --url @ --complete 2>/dev/null' >> $output_folder/js/js.txt
+
+		# Deduplicação: filtrar por domínio e remover duplicatas
 		cat $output_folder/js/js.txt | grep "$domain" | sort -u -o $output_folder/js/js.txt
 		jslen="$(cat $output_folder/js/js.txt | wc -l)"
 		echo -e "\033[32m[+] Encontrados \033[31m$jslen\033[32m JS files\033[m"
@@ -991,7 +1068,20 @@ findVuln() {
 		echo -e "\n\033[36m[+] Finding vulnerabilities with Nuclei 🔍\033[m"
 		[[ ! -d $HOME/nuclei-templates ]] && nuclei --update-templates
 		[[ ! -d $output_folder ]] && mkdir $output_folder 2>/dev/null
-		nuclei -l $alive_domains -t $HOME/nuclei-templates/ -o $output_folder/nuclei.txt --silent
+
+		# Nuclei otimizado: tags específicos + rate limiting + bulk processing (Elite Level)
+		echo -e "\033[38;5;148m[PERFORMANCE] Nuclei otimizado com tags críticos e rate-limit inteligente\033[m"
+		nuclei -l $alive_domains \
+			-t $HOME/nuclei-templates/ \
+			-tags cve,exposure,misconfig,takeover,sqli,xss,rce,lfi,ssrf \
+			-severity critical,high,medium \
+			-rate-limit 150 \
+			-bulk-size 25 \
+			-c 25 \
+			-timeout 10 \
+			-retries 1 \
+			-o $output_folder/nuclei.txt \
+			--silent
 		echo -e "\n\033[36m>>>\033[35m Finding XSS 🤖\033[m"
 		list="$OUTFOLDER/link-discovery/all.txt"
 		[[ ! -d $output_folder/xss-discovery ]] && mkdir $output_folder/xss-discovery 2>/dev/null
@@ -1028,7 +1118,7 @@ findVuln() {
 		gospider -S $OUTFOLDER/subdomains/alive.txt -c 10 -d 5 --blacklist ".(jpg|jpeg|gif|css|tif|tiff|png|ttf|woff|woff2|ico|pdf|svg|txt)" --other-source | grep -e "code-200" | awk '{print $5}'| grep "=" | qsreplace -a | dalfox pipe --skip-bav --silence | tee -a $output_folder/xss-discovery/xss.txt
 	fi
 	xssfound="$(cat $output_folder/xss-discovery/*.txt | wc -l)"
-	echo -e "\033[1;33m[!] Encontrados \033[1;31m$xssfound\033[33m possíveiss XSS\033[m"
+	echo -e "\033[1;33m[!] Encontrados \033[1;31m$xssfound\033[33m possíveis XSS\033[m"
 	echo -e "\n\033[36m>>>\033[35m Finding 403 HTTP Responses 🤖\033[m"
 	for a in $(cat $DOMAINS); do
 		r="$(curl -I -s -k $a | grep 'HTTP' | awk '{print $2}')"
@@ -1051,18 +1141,18 @@ findVuln() {
 	grepVuln "$open_redir_parameters" "$list" "$output_folder/possíveis-open-redir.txt"
 	if [ -e $output_folder/open-redir.txt ]; then
 		lenopenredir="$(cat $output_folder/open-redir.txt | wc -l)"
-		echo -e "\033[1;33m[!] Encontrados \033[1;31m$lenopenredir\033[33m possíveiss Open Redirects\033[m"
+		echo -e "\033[1;33m[!] Encontrados \033[1;31m$lenopenredir\033[33m possíveis Open Redirects\033[m"
 	else
-		echo -e "\033[1;33m[!] Encontrados \033[1;31m0\033[33m possíveiss Open Redirects\033[m"
+		echo -e "\033[1;33m[!] Encontrados \033[1;31m0\033[33m possíveis Open Redirects\033[m"
 	fi
 
 	echo -e "\n\033[36m>>>\033[35m Finding possíveis RCE 🤖\033[m"
 	grepVuln "$rce_parameters" "$list" "$output_folder/rce.txt"
 	if [ -e $output_folder/rce.txt ]; then
 		lenrce="$(cat $output_folder/rce.txt | wc -l)"
-		echo -e "\033[1;33m[!] Encontrados \033[1;31m$lenrce\033[33m possíveiss RCEs\033[m"
+		echo -e "\033[1;33m[!] Encontrados \033[1;31m$lenrce\033[33m possíveis RCEs\033[m"
 	else
-		echo -e "\033[1;33m[!] Encontrados \033[1;31m0\033[33m possíveiss RCEs\033[m"
+		echo -e "\033[1;33m[!] Encontrados \033[1;31m0\033[33m possíveis RCEs\033[m"
 	fi
 
 	echo -e "\n\033[36m>>>\033[35m Finding possíveis LFI 🤖\033[m"
@@ -1079,18 +1169,18 @@ findVuln() {
 			done
 			fi
 		fi
-		echo -e "\033[1;33m[!] Encontrados \033[1;31m$lenlfi\033[33m possíveiss LFIs\033[m"
+		echo -e "\033[1;33m[!] Encontrados \033[1;31m$lenlfi\033[33m possíveis LFIs\033[m"
 	else
-		echo -e "\033[1;33m[!] Encontrados \033[1;31m0\033[33m possíveiss LFIs\033[m"
+		echo -e "\033[1;33m[!] Encontrados \033[1;31m0\033[33m possíveis LFIs\033[m"
 	fi
 	echo -e "\n\033[36m>>>\033[35m Finding possíveis SQLi 🤖\033[m"
-	cat $DOMAINS | waybackurls | gf sqli >> $output_folder/possíveis-sqli.txt
+	cat $DOMAINS | sort -u | waybackurls | gf sqli >> $output_folder/possíveis-sqli.txt
 	if [ -e "$output_folder/possíveis-sqli.txt" ]; then
 		sqlifound="$(cat $output_folder/possíveis-sqli.txt | wc -l)"
 		if [ "$sqlifound" -ge "1" ]; then
-			echo -e "\033[1;33m[!] Encontrados \033[1;31m$sqlifound\033[33m possíveiss SQLi\033[m"
+			echo -e "\033[1;33m[!] Encontrados \033[1;31m$sqlifound\033[33m possíveis SQLi\033[m"
 		else
-			echo -e "\033[1;33m[!] Encontrados \033[1;31m0\033[33m possíveiss SQLi\033[m"
+			echo -e "\033[1;33m[!] Encontrados \033[1;31m0\033[33m possíveis SQLi\033[m"
 		fi
 	fi
 	if [ "$FUZZ" == "True" ]; then
@@ -1151,6 +1241,12 @@ if [ "$OUTFOLDER" == "" ]; then
 	OUTFOLDER="$SCRIPTPATH/$domain"
 fi
 DOMAINS="$OUTFOLDER/subdomains/subdomains.txt"
+
+# Valores padrão para flags opcionais
+[ -z "$FUZZ" ] && FUZZ="False"
+[ -z "$DIRFUZZ" ] && DIRFUZZ="False"
+[ -z "$PORTSCAN" ] && PORTSCAN="False"
+
 dep_falt=0
 
 show_banner
@@ -1295,6 +1391,14 @@ jsfound="$([ -f "$OUTFOLDER/link-discovery/js/js.txt" ] && cat $OUTFOLDER/link-d
 jsalive="$([ -f "$OUTFOLDER/link-discovery/js/AliveJS.txt" ] && cat $OUTFOLDER/link-discovery/js/AliveJS.txt | wc -l || echo 0)"
 lfound="$([ -f "$OUTFOLDER/link-discovery/all.txt" ] && cat $OUTFOLDER/link-discovery/all.txt | wc -l || echo 0)"
 foundvuln="$(($([ -d "$OUTFOLDER/vuln" ] && cat $OUTFOLDER/vuln/* 2>/dev/null | wc -l || echo 0)+$([ -d "$OUTFOLDER/vuln/xss-discovery" ] && cat $OUTFOLDER/vuln/xss-discovery/* 2>/dev/null | wc -l || echo 0)))"
+
+# Mostrar resumo de novos alvos encontrados
+if [ "$NEW_TARGETS_FOUND" -gt 0 ]; then
+	echo -e "\n\033[38;5;148m[+] Encontrados \033[38;5;198m$NEW_TARGETS_FOUND\033[38;5;148m NOVOS alvos nesta execução!\033[m"
+else
+	echo -e "\n\033[38;5;228m[!] Nenhum novo alvo encontrado - todos os alvos já existiam de execuções anteriores.\033[m"
+fi
+
 echo -e "\033[38;5;198m====================================================================================================================\033[m"
 echo -e "\033[38;5;198m====================\033[38;5;148m Resultados Finais \033[38;5;198m====================\033[m"
 echo -e "\033[38;5;148m[+] ASNs Encontrados: \033[38;5;198m$asn\033[m"
