@@ -403,12 +403,15 @@ asnEnum() {
 	# Remove arquivo temporário se existir
 	rm -f $output_folder/$org.txt.new
 
+	# Export env var para metabigor Go 1.25 compatibility
+	export ASSUME_NO_MOVING_GC_UNSAFE_RISK_IT_WITH=go1.25
+
 	if [ "$QUIET" != "True" ]; then
 		show_step_banner "🔍" "ENUMERAÇÃO ASN - Mapeando Redes" "198"
-		ASSUME_NO_MOVING_GC_UNSAFE_RISK_IT_WITH=go1.25 echo $org | metabigor net --org -o $output_folder/$org.txt.new 2>/dev/null
+		echo $org | metabigor net --org 2>/dev/null > $output_folder/$org.txt.new
 	else
 		echo -e -n "\n\033[38;5;81m[+] Enumeração ASN 🔎\033[m"
-		ASSUME_NO_MOVING_GC_UNSAFE_RISK_IT_WITH=go1.25 echo $org | metabigor net --org >> $output_folder/$org.txt.new 2>/dev/null
+		echo $org | metabigor net --org 2>/dev/null > $output_folder/$org.txt.new
 		echo " ✅"
 	fi
 
@@ -454,13 +457,13 @@ checkActive() {
 			# Verifica se é primeira execução ou re-scan
 			if [ -f "$output_folder/alive.txt" ]; then
 				# Re-scan: mostrar [NEW] apenas para domínios realmente novos
-				cat $subdomains | httprobe | while read line; do
+				cat $subdomains | httprobe | grep "$domain" | while read line; do
 					echo "$line" >> $output_folder/alive.txt.new
 					if ! grep -Fxq "$line" "$output_folder/alive.txt" 2>/dev/null; then
 						echo -e "\033[38;5;46m[NEW] $line\033[m"
 					fi
 				done
-				cat $subdomains | httpx --silent --threads 300 | while read line; do
+				cat $subdomains | httpx --silent --threads 300 | grep "$domain" | while read line; do
 					echo "$line" >> $output_folder/alive.txt.new
 					if ! grep -Fxq "$line" "$output_folder/alive.txt" 2>/dev/null; then
 						echo -e "\033[38;5;46m[NEW] $line\033[m"
@@ -468,17 +471,21 @@ checkActive() {
 				done
 			else
 				# Primeira execução: todos são novos
-				cat $subdomains | httprobe | while read line; do echo -e "\033[38;5;46m[NEW] $line\033[m"; echo "$line" >> $output_folder/alive.txt.new; done
-				cat $subdomains | httpx --silent --threads 300 | while read line; do echo -e "\033[38;5;46m[NEW] $line\033[m"; echo "$line" >> $output_folder/alive.txt.new; done
+				cat $subdomains | httprobe | grep "$domain" | while read line; do echo -e "\033[38;5;46m[NEW] $line\033[m"; echo "$line" >> $output_folder/alive.txt.new; done
+				cat $subdomains | httpx --silent --threads 300 | grep "$domain" | while read line; do echo -e "\033[38;5;46m[NEW] $line\033[m"; echo "$line" >> $output_folder/alive.txt.new; done
 			fi
 		else
 			echo -e "\n\033[38;5;81m[+] Domínios Ativos 🔎\033[m"
-			cat $subdomains | httprobe >> $output_folder/alive.txt.new
-			cat $subdomains | httpx --silent --threads 300 >> $output_folder/alive.txt.new
+			cat $subdomains | httprobe | grep "$domain" >> $output_folder/alive.txt.new
+			cat $subdomains | httpx --silent --threads 300 | grep "$domain" >> $output_folder/alive.txt.new
 		fi
 
-		# Limpa e remove duplicatas dos novos resultados
-		grep "$domain" $output_folder/alive.txt.new | sort -u -o $output_folder/alive.txt.new
+		# Limpa e remove duplicatas dos novos resultados (verificação de arquivo vazio)
+		if [ -f "$output_folder/alive.txt.new" ] && [ -s "$output_folder/alive.txt.new" ]; then
+			sort -u $output_folder/alive.txt.new -o $output_folder/alive.txt.new
+		else
+			touch $output_folder/alive.txt.new
+		fi
 
 		# Merge inteligente com arquivo existente
 		if [ -f "$output_folder/alive.txt" ]; then
@@ -520,10 +527,14 @@ subdomainEnumeration() {
 			assetfinder $target | tee -a $output_folder/subdomains.txt.new || $GOPATH/bin/assetfinder $target | tee -a $output_folder/subdomains.txt.new
 			echo -e "\n\033[38;5;81m>>>\033[38;5;141m Executando subfinder 🔍\033[m"
 			subfinder -d $target -all -silent | tee -a $output_folder/subdomains.txt.new || $GOPATH/bin/subfinder --silent -d $target | tee -a $output_folder/subdomains.txt.new
+			echo -e "\n\033[38;5;81m>>>\033[38;5;141m Executando crt.sh (Certificate Transparency) 🔍\033[m"
+			curl -s "https://crt.sh/?q=%25.$target&output=json" | jq -r '.[].name_value' 2>/dev/null | sed 's/\*\.//g' | sort -u | tee -a $output_folder/subdomains.txt.new
 			#echo -e "\n\033[38;5;81m>>>\033[38;5;141m Executando amass 🔍\033[m"
 			#amass enum --passive -d $target | tee -a $output_folder/subdomains.txt.new || $GOPATH/bin/amass enum --passive -d $target | tee -a $output_folder/subdomains.txt.new
 			echo -e "\n\033[38;5;81m>>>\033[38;5;141m Executando findomain 🔍\033[m"
-			findomain -q --target $target | tee -a $output_folder/subdomains.txt.new || $GOPATH/bin/findomain -q --target $target | tee -a $output_folder/subdomains.txt.new
+			findomain -t $target -q -u $SCRIPTPATH/findomain-$target.txt 2>/dev/null || $GOPATH/bin/findomain -t $target -q -u $SCRIPTPATH/findomain-$target.txt 2>/dev/null
+			[ -f "$SCRIPTPATH/findomain-$target.txt" ] && cat $SCRIPTPATH/findomain-$target.txt | tee -a $output_folder/subdomains.txt.new
+			[ -f "$SCRIPTPATH/findomain-$target.txt" ] && rm $SCRIPTPATH/findomain-$target.txt
 			echo -e "\n\033[38;5;81m>>>\033[38;5;141m Executando SubDomainizer 🔍\033[m"
 			sublist3r -d $target -o $SCRIPTPATH/sublist3r-$domain.txt
 			[ -f "$SCRIPTPATH/sublist3r-$domain.txt" ] && cat $SCRIPTPATH/sublist3r-$domain.txt >> $output_folder/subdomains.txt.new
@@ -542,11 +553,16 @@ subdomainEnumeration() {
 			echo -e -n "\033[38;5;81m>>>\033[38;5;141m Executando subfinder 🔍\033[m"
 			subfinder --silent -d $target >> $output_folder/subdomains.txt.new || $GOPATH/bin/subfinder --silent -d $target >> $output_folder/subdomains.txt.new
 			echo " ✅"
+			echo -e -n "\033[38;5;81m>>>\033[38;5;141m Executando crt.sh 🔍\033[m"
+			curl -s "https://crt.sh/?q=%25.$target&output=json" | jq -r '.[].name_value' 2>/dev/null | sed 's/\*\.//g' | sort -u >> $output_folder/subdomains.txt.new
+			echo " ✅"
 			#echo -e -n "\033[38;5;81m>>>\033[38;5;141m Executando amass 🔍\033[m"
 			#amass enum --passive -d $target >> $output_folder/subdomains.txt.new || $GOPATH/bin/amass enum --passive -d $target >> $output_folder/subdomains.txt.new
 			#echo " ✅"
 			echo -e -n "\033[38;5;81m>>>\033[38;5;141m Executando findomain 🔍\033[m"
-			findomain -q --target $target >> $output_folder/subdomains.txt.new || $GOPATH/bin/findomain -q --target $target >> $output_folder/subdomains.txt.new
+			findomain -t $target -q -u $SCRIPTPATH/findomain-$target.txt 2>/dev/null || $GOPATH/bin/findomain -t $target -q -u $SCRIPTPATH/findomain-$target.txt 2>/dev/null
+			[ -f "$SCRIPTPATH/findomain-$target.txt" ] && cat $SCRIPTPATH/findomain-$target.txt >> $output_folder/subdomains.txt.new
+			[ -f "$SCRIPTPATH/findomain-$target.txt" ] && rm $SCRIPTPATH/findomain-$target.txt
 			echo " ✅"
 			echo -e -n "\n\033[38;5;81m>>>\033[38;5;141m Executando sublist3r 🔍\033[m"
 			sublist3r -d $target -o $SCRIPTPATH/sublist3r-$domain.txt > $SCRIPTPATH/temp.txt
@@ -640,25 +656,33 @@ dnsLookup() {
 			dnsx --silent -l $domains -resp -o $output_folder/DNS/dns.txt || $GOPATH/bin/dnsx -l $DOMAINS -resp -o $output_folder/DNS/dns.txt
 			echo -e "\033[m"
 			echo -e "\033[38;5;81m>>>\033[38;5;141m Enumeração DNS 🔍\033[m"
-			dnsrecon -d $domain -D $wordlist | tee -a $output_folder/DNS/dnsrecon.txt
-			dnsenum $domain -f $wordlist -o $output_folder/DNS/dnsenum.xml
+			echo -e "\033[38;5;228m[!] Executando dnsrecon (pode dar timeout em domínios protegidos)...\033[m"
+			timeout 120 dnsrecon -d $domain -D $wordlist 2>&1 | grep -v "ERROR" | tee -a $output_folder/DNS/dnsrecon.txt || echo -e "\033[38;5;228m[!] dnsrecon timeout/erro (normal para alvos protegidos)\033[m"
+			echo -e "\033[38;5;228m[!] Executando dnsenum (pode dar timeout em domínios protegidos)...\033[m"
+			timeout 120 dnsenum $domain -f $wordlist -o $output_folder/DNS/dnsenum.xml 2>&1 | grep -v "query timed out" || echo -e "\033[38;5;228m[!] dnsenum timeout/erro (normal para alvos protegidos)\033[m"
 		else
 			echo -e "\n\033[38;5;81m[+] DNS Lookup 🔎\033[m"
 			echo -e -n "\033[38;5;81m>>>\033[38;5;141m Descobrindo IPs 🔍\033[m"
-			dnsx --silent -l $domains -resp -o $output_folder/DNS/dns.txt > $SCRIPTPATH/temp || $GOPATH/bin/dnsx --silent -l $domains -resp -o $output_folder/DNS/dns.txt > $SCRIPTPATH/temp
-			rm $SCRIPTPATH/temp
+			dnsx --silent -l $domains -resp -o $output_folder/DNS/dns.txt > $SCRIPTPATH/temp 2>/dev/null || $GOPATH/bin/dnsx --silent -l $domains -resp -o $output_folder/DNS/dns.txt > $SCRIPTPATH/temp 2>/dev/null
+			rm -f $SCRIPTPATH/temp
 			echo " ✅"
 			echo -e -n "\033[38;5;81m>>>\033[38;5;141m Enumeração DNS 🔍\033[m"
-			dnsrecon -d $domain -D $wordlist >> $output_folder/DNS/dnsrecon.txt 2>/dev/null > $SCRIPTPATH/temp1
-			rm $SCRIPTPATH/temp1
-			dnsenum $domain -f $wordlist -o $output_folder/DNS/dnsenum.xml 2>/dev/null > $SCRIPTPATH/temp2
-			rm $SCRIPTPATH/temp2
+			timeout 120 dnsrecon -d $domain -D $wordlist >> $output_folder/DNS/dnsrecon.txt 2>/dev/null || true
+			timeout 120 dnsenum $domain -f $wordlist -o $output_folder/DNS/dnsenum.xml 2>/dev/null || true
 			echo " ✅"
 		fi
-		cat $output_folder/DNS/dns.txt | awk '{print $2}' | tr -d "[]" >> $output_folder/DNS/ip_only.txt
-		if [ -e $output_folder/DNS/ip_only.txt ]; then
+
+		# Processar IPs descobertos (com verificação de arquivo vazio)
+		if [ -f "$output_folder/DNS/dns.txt" ] && [ -s "$output_folder/DNS/dns.txt" ]; then
+			cat $output_folder/DNS/dns.txt | awk '{print $2}' | tr -d "[]" | grep -v "^$" >> $output_folder/DNS/ip_only.txt
+			sort -u $output_folder/DNS/ip_only.txt -o $output_folder/DNS/ip_only.txt 2>/dev/null
+		fi
+
+		if [ -f "$output_folder/DNS/ip_only.txt" ] && [ -s "$output_folder/DNS/ip_only.txt" ]; then
 			ipfound="$(cat $output_folder/DNS/ip_only.txt | wc -l)"
 			echo -e "\033[38;5;198m[+] Encontrados \033[38;5;198m$ipfound\033[38;5;148m IPs\033[m"
+		else
+			echo -e "\033[38;5;228m[!] Nenhum IP descoberto (domínio pode estar protegido ou inacessível)\033[m"
 		fi
 		[ -f "$SCRIPTPATH/$domain\_ips.txt" ] && rm $SCRIPTPATH/$domain\_ips.txt
 	fi
