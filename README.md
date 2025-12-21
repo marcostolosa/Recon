@@ -152,41 +152,6 @@ Choose wordlist based on scan thoroughness:
 
 ---
 
-## Key Features
-
-### Checkpoint System & Resume Capability
-- **Automatic Resume:** If interrupted (Ctrl+C), the script continues from where it left off
-- **Persistent State:** Progress saved in `.checkpoint` file within output folder
-- **Smart Skip:** Completed stages are automatically skipped on re-run
-- **Visual Progress:** Real-time progress indicator showing completed stages (e.g., "5/17 etapas (29%)")
-
-### Intelligent Result Merging
-- **Always-Run Discovery Stages:** Subdomain enumeration, ASN lookup, link discovery, and endpoint enumeration always execute to find new targets
-- **Deduplicated Merging:** Uses `anew` to add only new results without duplicates
-- **Incremental Growth:** Preserves all old results while adding new discoveries
-- **Live Feedback:** Shows exactly how many new items were found (e.g., "[+] Adicionados 47 novos subdomínios (total: 523)")
-
-### Performance Optimizations
-- **Parallel Execution:** Link discovery runs hakrawler, katana, and waybackurls in parallel (20 threads each) for **10-50x speedup**
-- **Optimized Nuclei:** Tags filtering (cve,exposure,misconfig,takeover,sqli,xss,rce,lfi,ssrf), rate-limiting (150 req/s), and bulk processing (25 targets/batch) for **3x faster scans**
-- **Wayback Fallback:** If waybackurls fails, automatically falls back to direct Wayback Machine API queries with cache-busting
-
-### Real-Time Feedback
-- **Live Feed:** New active domains appear instantly with `[NEW]` tag during scanning
-- **Smart Detection:** On re-scans, `[NEW]` tag only shows for truly new discoveries
-- **Progress Tracking:** Global counter tracks total new targets found across all stages
-
-### Performance Benchmark (100 Subdomains)
-
-| Stage | Before | After | Improvement |
-|-------|--------|-------|-------------|
-| Link Discovery | 30 min | 3 min | **10x faster** |
-| Nuclei Scan | 45 min | 15 min | **3x faster** |
-| JS Enumeration | 20 min | 5 min | **4x faster** |
-| **Total** | **95 min** | **23 min** | **4.1x faster** |
-
----
-
 ## Pipeline Stages
 
 The script executes **17 stages** sequentially:
@@ -194,7 +159,7 @@ The script executes **17 stages** sequentially:
 | # | Stage | Tool(s) | Output |
 |---|-------|---------|--------|
 | 1 | ASN Enumeration | metabigor | ASNs, IP ranges |
-| 2 | Subdomain Enumeration | assetfinder, subfinder, findomain, sublist3r, knockpy, github-subdomains | All discovered subdomains |
+| 2 | Subdomain Enumeration | assetfinder, subfinder, crt.sh, findomain, sublist3r, knockpy, github-subdomains (7 tools) | All discovered subdomains |
 | 3 | Organize Domains | regex | Domains by level (2nd, 3rd, 4th+) |
 | 4 | DNS Lookup | dnsx, dnsrecon, dnsenum | IPs, DNS records |
 | 5 | Check Active | httprobe, httpx | HTTP/HTTPS responsive domains |
@@ -206,10 +171,10 @@ The script executes **17 stages** sequentially:
 | 11 | Google Dorks | Custom | Google search queries |
 | 12 | GitHub Dorks | Custom | GitHub code searches |
 | 13 | Screenshots | EyeWitness | Visual recon |
-| 14 | Port Scanning | masscan, nmap, naabu | Open ports (optional -P) |
-| 15 | Link Discovery | hakrawler, katana, waybackurls | Crawled URLs (parallel execution: 20 threads) |
+| 14 | Port Scanning | masscan, nmap, naabu, Rustscan | Open ports (optional -P) |
+| 15 | Link Discovery | hakrawler, katana, waybackurls, gau | Crawled URLs (parallel execution: 20 threads) |
 | 16 | Endpoints Enumeration | ParamSpider, gospider, getJS | URLs with parameters |
-| 17 | Vulnerability Scan | Nuclei, Gxss, gf | XSS, SQLi, LFI, RCE candidates (optimized Nuclei) |
+| 17 | Vulnerability Scan | Nuclei, Xsstrike, Dalfox, Gxss, gf | XSS, SQLi, LFI, RCE candidates (optimized Nuclei) |
 
 ---
 
@@ -283,16 +248,6 @@ MIT License - see [LICENSE](LICENSE) file
 - **Prohibited:** Unauthorized scanning, malicious use, attacks without consent
 
 **Always obtain written authorization before scanning targets you don't own.**
-
----
-
-## Credits
-
-### Original Author
-- **dirsoooo** - [GitHub](https://github.com/dirsoooo)
-
-### Tools Used
-Thanks to all the security researchers and developers who created the 30+ tools integrated into this framework.
 
 ---
 
