@@ -450,6 +450,9 @@ checkActive() {
 		# Remove arquivo temporário se existir
 		rm -f $output_folder/alive.txt.new
 
+		# FILTRO RIGOROSO: Escape de pontos no domínio para regex
+		domain_escaped=$(echo "$domain" | sed 's/\./\\./g')
+
 		if [ "$QUIET" != "True" ]; then
 			show_step_banner "✅" "TESTANDO DOMÍNIOS - Verificando Ativos" "148"
 			echo -e "   \033[38;5;208m⚡ LIVE FEED:\033[m Novos domínios ativos aparecerão em tempo real\n"
@@ -457,13 +460,14 @@ checkActive() {
 			# Verifica se é primeira execução ou re-scan
 			if [ -f "$output_folder/alive.txt" ]; then
 				# Re-scan: mostrar [NEW] apenas para domínios realmente novos
-				cat $subdomains | httprobe | grep "$domain" | while read line; do
+				# FILTRO RIGOROSO: Apenas URLs que terminam com o domínio target
+				cat $subdomains | httprobe | grep -E "https?://([^/]*\.)?${domain_escaped}(/|$)" | while read line; do
 					echo "$line" >> $output_folder/alive.txt.new
 					if ! grep -Fxq "$line" "$output_folder/alive.txt" 2>/dev/null; then
 						echo -e "\033[38;5;46m[NEW] $line\033[m"
 					fi
 				done
-				cat $subdomains | httpx --silent --threads 300 | grep "$domain" | while read line; do
+				cat $subdomains | httpx --silent --threads 300 | grep -E "https?://([^/]*\.)?${domain_escaped}(/|$)" | while read line; do
 					echo "$line" >> $output_folder/alive.txt.new
 					if ! grep -Fxq "$line" "$output_folder/alive.txt" 2>/dev/null; then
 						echo -e "\033[38;5;46m[NEW] $line\033[m"
@@ -471,13 +475,13 @@ checkActive() {
 				done
 			else
 				# Primeira execução: todos são novos
-				cat $subdomains | httprobe | grep "$domain" | while read line; do echo -e "\033[38;5;46m[NEW] $line\033[m"; echo "$line" >> $output_folder/alive.txt.new; done
-				cat $subdomains | httpx --silent --threads 300 | grep "$domain" | while read line; do echo -e "\033[38;5;46m[NEW] $line\033[m"; echo "$line" >> $output_folder/alive.txt.new; done
+				cat $subdomains | httprobe | grep -E "https?://([^/]*\.)?${domain_escaped}(/|$)" | while read line; do echo -e "\033[38;5;46m[NEW] $line\033[m"; echo "$line" >> $output_folder/alive.txt.new; done
+				cat $subdomains | httpx --silent --threads 300 | grep -E "https?://([^/]*\.)?${domain_escaped}(/|$)" | while read line; do echo -e "\033[38;5;46m[NEW] $line\033[m"; echo "$line" >> $output_folder/alive.txt.new; done
 			fi
 		else
 			echo -e "\n\033[38;5;81m[+] Domínios Ativos 🔎\033[m"
-			cat $subdomains | httprobe | grep "$domain" >> $output_folder/alive.txt.new
-			cat $subdomains | httpx --silent --threads 300 | grep "$domain" >> $output_folder/alive.txt.new
+			cat $subdomains | httprobe | grep -E "https?://([^/]*\.)?${domain_escaped}(/|$)" >> $output_folder/alive.txt.new
+			cat $subdomains | httpx --silent --threads 300 | grep -E "https?://([^/]*\.)?${domain_escaped}(/|$)" >> $output_folder/alive.txt.new
 		fi
 
 		# Limpa e remove duplicatas dos novos resultados (verificação de arquivo vazio)
@@ -591,7 +595,8 @@ subdomainEnumeration() {
 		[ -f "$SCRIPTPATH/knock.txt" ] && rm $SCRIPTPATH/knock.txt
 
 		# Limpa resultados novos (remove wildcards, erros e emails)
-		cat $output_folder/subdomains.txt.new 2>/dev/null | grep -v "\*" | grep -v "error occurred" | grep -v "@" | grep "$target" | sort -u > $SCRIPTPATH/temporary_clean.txt
+		# FILTRO RIGOROSO: Apenas domínios que TERMINAM com $target ou SÃO exatamente $target
+		cat $output_folder/subdomains.txt.new 2>/dev/null | grep -v "\*" | grep -v "error occurred" | grep -v "@" | grep -E "(^|\.)$target$" | sort -u > $SCRIPTPATH/temporary_clean.txt
 
 		# Faz merge inteligente com resultados anteriores (se existirem)
 		if [ -f "$output_folder/subdomains.txt" ]; then
@@ -1025,12 +1030,13 @@ linkDiscovery() {
             fi
         '
 
-        cat "$output_folder/hakrawler/"*.txt | cut -d "]" -f2- | sed -e 's/^[ \t]*//' >> "$output_folder/all.txt"
-        cat "$output_folder/katana/"*.txt | sed -e 's/^[ \t]*//' >> "$output_folder/all.txt"
-        cat "$output_folder/waybackurls/"*.txt | sed -e 's/^[ \t]*//' >> "$output_folder/all.txt"
+        cat "$output_folder/hakrawler/"*.txt 2>/dev/null | cut -d "]" -f2- | sed -e 's/^[ \t]*//' >> "$output_folder/all.txt" 2>/dev/null
+        cat "$output_folder/katana/"*.txt 2>/dev/null | sed -e 's/^[ \t]*//' >> "$output_folder/all.txt" 2>/dev/null
+        cat "$output_folder/waybackurls/"*.txt 2>/dev/null | sed -e 's/^[ \t]*//' >> "$output_folder/all.txt" 2>/dev/null
 
-        # Deduplicação: filtrar por domínio e remover duplicatas
-        cat "$output_folder/all.txt" | grep "$domain" | sort -u -o "$output_folder/all.txt"
+        # FILTRO RIGOROSO: Apenas URLs que pertencem ao domínio target (não substrings)
+        domain_escaped=$(echo "$domain" | sed 's/\./\\./g')
+        cat "$output_folder/all.txt" 2>/dev/null | grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)" | sort -u -o "$output_folder/all.txt"
 
         if [ "$QUIET" == "True" ]; then
             echo " ✅"
@@ -1061,15 +1067,18 @@ endpointsEnumeration() {
 			xargs -a $alive_domains -I@ bash -c "cd $output_folder && $SCRIPTPATH/.venv/bin/paramspider -d @ -s 2>/dev/null" >> $output_folder/all.txt
 			echo " ✅"
 		fi
-		cat $output_folder/all.txt | grep "$domain" | sort -u -o $output_folder/all.txt
+		# FILTRO RIGOROSO: Apenas URLs do domínio target
+		domain_escaped=$(echo "$domain" | sed 's/\./\\./g')
+		cat $output_folder/all.txt 2>/dev/null | grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)" | sort -u -o $output_folder/all.txt
+
 		[[ ! -d $output_folder/js ]] && mkdir $output_folder/js
 		echo -e "\n\033[36m>>>\033[35m Enumerating Javascript files 🔍\033[m"
 		xargs -P 500 -a $DOMAINS -I@ bash -c 'nc -w1 -z -v @ 443 2>/dev/null && echo @' | xargs -I@ -P10 bash -c 'gospider -a -s "https://@" -d 2 | grep -Eo "(http|https)://[^/\"].*\.js+" | sed "s#\] \- #\n#g" | anew' | grep -Eo "(http|https)://[^/\"].*\.js+" >> $output_folder/js/js.txt
 		cat $alive_domains | sed 's|https\?://||' | cut -d'/' -f1 | sort -u | waybackurls | grep -iE '\.js' | grep -iEv '(\.jsp|\.json)' >> $output_folder/js/js.txt
 		xargs -a $alive_domains -I@ bash -c 'getJS --url @ --complete 2>/dev/null' >> $output_folder/js/js.txt
 
-		# Deduplicação: filtrar por domínio e remover duplicatas
-		cat $output_folder/js/js.txt | grep "$domain" | sort -u -o $output_folder/js/js.txt
+		# FILTRO RIGOROSO: Apenas JS files do domínio target (remove CDNs externos)
+		cat $output_folder/js/js.txt 2>/dev/null | grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)" | sort -u -o $output_folder/js/js.txt
 		jslen="$(cat $output_folder/js/js.txt | wc -l)"
 		echo -e "\033[32m[+] Encontrados \033[31m$jslen\033[32m JS files\033[m"
 		cat $output_folder/js/js.txt | anti-burl | awk '{print $4}' | sort -u >> $output_folder/js/AliveJS.txt
