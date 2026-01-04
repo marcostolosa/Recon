@@ -1399,14 +1399,17 @@ findVuln() {
 
 	# Get all targets to test
 	local all_targets=$(cat "$alive_domains" | sort -u)
-	local total_count=$(echo "$all_targets" | wc -l)
+	#pare
+	ngrep -v "^$" to avoid counting empty lines (echo "" | wc -l returns 1)
+	local total_count=$(echo "$all_targets" | grep -v "^$" | wc -l)
 
 	# Check what was actually completed (not just started)
 	local completed_file="$output_folder/.completed_targets.txt"
 	touch "$completed_file" 2>/dev/null
 
 	# Find targets that haven't been COMPLETED yet
-	local pending_targets=$(comm -23 <(echo "$all_targets") <(sort "$completed_file" 2>/dev/null) | sort -u)
+	# comm requires BOTH inputs to be sorted - re-sort to guarantee consistency
+	local pending_targets=$(comm -23 <(echo "$all_targets" | sort) <(sort "$completed_file" 2>/dev/null))
 	local pending_count=$(echo "$pending_targets" | grep -v "^$" | wc -l)
 
 	if [ "$pending_count" -eq 0 ]; then
@@ -1694,19 +1697,19 @@ echo -e "\n${PINK}════════════════════�
 echo -e "${PINK}                   FINAL RESULTS - CVE-HUNTERS              ${RESET}"
 echo -e "${PINK}════════════════════════════════════════════════════════════${RESET}\n"
 
-# Count results
-local org="$(echo $domain | cut -d '.' -f1)"
-local asn_count=0
-local sub_count=0
-local alive_count=0
-local waf_count=0
-local nowaf_count=0
-local takeover_count=0
-local ip_count=0
-local fav_count=0
-local link_count=0
-local js_count=0
-local vuln_count=0
+# Count results (NOT using 'local' - we're in main script body, not inside a function)
+org="$(echo $domain | cut -d '.' -f1)"
+asn_count=0
+sub_count=0
+alive_count=0
+waf_count=0
+nowaf_count=0
+takeover_count=0
+ip_count=0
+fav_count=0
+link_count=0
+js_count=0
+vuln_count=0
 
 [ -f "$OUTFOLDER/asn/$org.txt" ] && asn_count=$(cat "$OUTFOLDER/asn/$org.txt" | wc -l)
 [ -f "$DOMAINS" ] && sub_count=$(cat "$DOMAINS" | wc -l)
@@ -1767,7 +1770,8 @@ fi
 
 # Show trackers info
 if [ -f "$OUTFOLDER/.trackers/new_targets_last_24h.txt" ]; then
-	local new_24h=$(cat "$OUTFOLDER/.trackers/new_targets_last_24h.txt" | wc -l)
+	# BUG FIX: 'local' keyword is only valid inside functions - removed
+	new_24h=$(cat "$OUTFOLDER/.trackers/new_targets_last_24h.txt" | grep -v "^$" | wc -l)
 	if [ "$new_24h" -gt 0 ]; then
 		echo -e "${YELLOW}[!] Targets discovered in last 24h: ${PINK}$new_24h${YELLOW} (high priority for testing!)${RESET}"
 	fi
