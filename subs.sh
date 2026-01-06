@@ -107,12 +107,14 @@ PIPELINE_STEPS=(
 	"vulnerability_scan"
 )
 
-# Steps that always run (discovery stages)
+# Steps that always run (discovery stages + incremental testing)
 ALWAYS_RUN_STEPS=(
 	"asn_enum"
 	"subdomain_enum"
 	"organize_domains"
+	"subdomain_takeover"
 	"check_active"
+	"waf_detect"
 	"link_discovery"
 	"endpoints_enum"
 )
@@ -197,9 +199,11 @@ show_step_banner() {
 	local emoji="$3"
 	local color="${4:-$CYAN}"
 
-	echo -e "\n${color}╔════════════════════════════════════════════════════════════╗${RESET}"
-	echo -e "${color}║  ${emoji}  ${step_name}${RESET}"
-	echo -e "${color}╚════════════════════════════════════════════════════════════╝${RESET}"
+	# Modern minimalist style - cleaner and faster to read
+	echo -e ""
+	echo -e "${color}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+	echo -e "${color}${emoji} ${PINK}[${step_number}/17]${color} ${step_name}${RESET}"
+	echo -e "${color}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 }
 
 check_recent_scan() {
@@ -230,9 +234,9 @@ check_recent_scan() {
 
 	# If scan was less than 6 hours ago, suggest quick mode
 	if [ "$hours_since" -lt 6 ] && [ "$QUICK_MODE" != "True" ]; then
-		echo -e "${ORANGE}╔════════════════════════════════════════════════════════════════════╗${RESET}"
-		echo -e "${ORANGE}║  ⚡ OTIMIZAÇÃO SUGERIDA                                            ║${RESET}"
-		echo -e "${ORANGE}╚════════════════════════════════════════════════════════════════════╝${RESET}"
+		echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+		echo -e "${ORANGE}⚡ OTIMIZAÇÃO SUGERIDA${RESET}"
+		echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 		echo -e "${YELLOW}[!] Último scan foi há ${hours_since} horas${RESET}"
 		echo -e "${GREEN}[TIP] Para re-rodar apenas testing (pular discovery), use:${RESET}"
 		echo -e "    ${PINK}./recon_elite.sh -d $domain -w $wordlist -Q${RESET}"
@@ -366,7 +370,7 @@ printBanner() {
 	echo -e "\t ╚═════╝  ╚═══╝  ╚══════╝      ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚══════╝"
 	echo -e "${RESET}"
 	echo -e "\t\t${PINK}🎯 RECON - Automated Bug Bounty Reconnaissance${RESET}"
-	echo -e "\t\t${CYAN}Version 2.0 ELITE | Enhanced with Checkpoint System${RESET}"
+	echo -e "\t\t${CYAN}Version 2.0 ${RESET}"
 }
 
 show_help() {
@@ -928,6 +932,39 @@ checkActive() {
 	if [ -f "$output_folder/alive.txt.new" ] && [ -s "$output_folder/alive.txt.new" ]; then
 		sort -u "$output_folder/alive.txt.new" -o "$output_folder/alive.txt.new"
 
+		# ═══════════════════════════════════════════════════════════════════
+		# 🚀  HTTP/HTTPS Deduplication
+		# If HTTPS is alive, remove HTTP (same endpoint, prefer secure)
+		# This saves time on WAF detection, screenshots, scanning, etc.
+		# ═══════════════════════════════════════════════════════════════════
+		local before_dedup=$(wc -l < "$output_folder/alive.txt.new")
+
+		# Extract all HTTPS domains (without protocol)
+		grep "^https://" "$output_folder/alive.txt.new" | sed 's|^https://||' | sort -u > "$output_folder/.https_domains.tmp"
+
+		# Keep all HTTPS entries + HTTP entries that DON'T have HTTPS equivalent
+		{
+			# All HTTPS entries (always keep)
+			grep "^https://" "$output_folder/alive.txt.new"
+			# HTTP entries only if no HTTPS equivalent exists
+			grep "^http://" "$output_folder/alive.txt.new" | while read http_url; do
+				domain_part=$(echo "$http_url" | sed 's|^http://||')
+				if ! grep -qxF "$domain_part" "$output_folder/.https_domains.tmp" 2>/dev/null; then
+					echo "$http_url"
+				fi
+			done
+		} | sort -u > "$output_folder/alive.txt.dedup"
+
+		mv "$output_folder/alive.txt.dedup" "$output_folder/alive.txt.new"
+		rm -f "$output_folder/.https_domains.tmp"
+
+		local after_dedup=$(wc -l < "$output_folder/alive.txt.new")
+		local removed=$((before_dedup - after_dedup))
+
+		if [ "$removed" -gt 0 ]; then
+			echo -e "${CYAN}[⚡] Removidos ${PINK}$removed${CYAN} HTTP duplicados (HTTPS preferido)${RESET}"
+		fi
+
 		# Merge with existing file
 		if [ -f "$output_folder/alive.txt" ]; then
 			local added=$(merge_results "$output_folder/alive.txt.new" "$output_folder/alive.txt")
@@ -975,7 +1012,7 @@ wafDetect() {
 	# Identify new domains
 	if [ -f "$previous_checked" ]; then
 		comm -13 <(sort "$previous_checked") <(sort "$alive_file") > "$new_domains_file"
-		local new_count=$(cat "$new_domains_file" | wc -l)
+		local new_count=$(cat "$new_domains_file" | grep -v "^$" | wc -l)
 
 		if [ "$new_count" -eq 0 ]; then
 			echo -e "${CYAN}[SKIP] Nenhum domínio novo para detectar WAF${RESET}"
@@ -983,14 +1020,16 @@ wafDetect() {
 		else
 			echo -e "${CYAN}[INCREMENTAL] Detectando WAF em ${PINK}$new_count${CYAN} novos domínios${RESET}"
 
+			# BUGFIX: wafw00f -o saves CSV format, but we need the readable stdout
+			# Capture stdout (readable format with "is behind") AND show to user
 			if [ "$QUIET" == "True" ]; then
-				wafw00f -i "$new_domains_file" -a -o "$output_folder/.waf.txt.new" >/dev/null 2>&1
+				wafw00f -i "$new_domains_file" -a 2>/dev/null >> "$output_folder/.waf.txt.new"
 			else
-				wafw00f -i "$new_domains_file" -a -o "$output_folder/.waf.txt.new"
+				wafw00f -i "$new_domains_file" -a 2>/dev/null | tee -a "$output_folder/.waf.txt.new"
 			fi
 
 			# Merge results
-			if [ -f "$output_folder/.waf.txt.new" ]; then
+			if [ -f "$output_folder/.waf.txt.new" ] && [ -s "$output_folder/.waf.txt.new" ]; then
 				cat "$output_folder/.waf.txt.new" >> "$waf_file"
 				rm "$output_folder/.waf.txt.new"
 			fi
@@ -998,24 +1037,27 @@ wafDetect() {
 			# Update checked list
 			cat "$new_domains_file" >> "$previous_checked"
 			sort -u "$previous_checked" -o "$previous_checked"
-			rm "$new_domains_file"
+			rm -f "$new_domains_file"
 		fi
 	else
 		# First run - test all
 		echo -e "${CYAN}[FULL-SCAN] Detectando WAF em todos os domínios ativos${RESET}"
+
+		# BUGFIX: Capture stdout (readable format) instead of using -o flag
 		if [ "$QUIET" == "True" ]; then
-			wafw00f -i "$alive_file" -a -o "$waf_file" >/dev/null 2>&1
+			wafw00f -i "$alive_file" -a 2>/dev/null > "$waf_file"
 		else
-			wafw00f -i "$alive_file" -a -o "$waf_file"
+			wafw00f -i "$alive_file" -a 2>/dev/null | tee "$waf_file"
 		fi
 
 		# Create checked list
 		cp "$alive_file" "$previous_checked"
 	fi
 
-	echo -e "\n${PINK}╔══════════════════════════════════════════════════════════════╗${RESET}"
-	echo -e "${PINK}║  🛡️  SEPARANDO DOMÍNIOS COM/SEM WAF                          ║${RESET}"
-	echo -e "${PINK}╚══════════════════════════════════════════════════════════════╝${RESET}"
+	echo -e ""
+	echo -e "${PINK}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+	echo -e "${PINK}🛡️  SEPARANDO DOMÍNIOS COM/SEM WAF${RESET}"
+	echo -e "${PINK}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 
 	# Parse wafw00f output to extract domains WITH WAF
 	# wafw00f format: "https://domain.com is behind Cloudflare (Cloudflare Inc.)"
@@ -1058,9 +1100,9 @@ wafDetect() {
 	[ -f "$nowaf_domains" ] && nowaf_count=$(cat "$nowaf_domains" | wc -l)
 
 	echo -e ""
-	echo -e "${ORANGE}╔══════════════════════════════════════════════════════════════╗${RESET}"
-	echo -e "${ORANGE}║  ⚠️  RESULTADOS DA DETECÇÃO DE WAF                           ║${RESET}"
-	echo -e "${ORANGE}╚══════════════════════════════════════════════════════════════╝${RESET}"
+	echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+	echo -e "${ORANGE}⚠️  RESULTADOS DA DETECÇÃO DE WAF${RESET}"
+	echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 	echo -e ""
 	echo -e "${GREEN}[+] Total de domínios ativos: ${PINK}$total_count${RESET}"
 	echo -e "${ORANGE}[!] Domínios COM WAF (manual review): ${PINK}$waf_count${ORANGE} → ${YELLOW}$waf_domains${RESET}"
@@ -1068,9 +1110,9 @@ wafDetect() {
 	echo -e ""
 
 	if [ "$waf_count" -gt 0 ]; then
-		echo -e "${ORANGE}╔══════════════════════════════════════════════════════════════╗${RESET}"
-		echo -e "${ORANGE}║  🚨 AVISO DE SEGURANÇA                                       ║${RESET}"
-		echo -e "${ORANGE}╚══════════════════════════════════════════════════════════════╝${RESET}"
+		echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+		echo -e "${ORANGE}🚨 AVISO DE SEGURANÇA${RESET}"
+		echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 		echo -e "${YELLOW}[!] Os ${PINK}$waf_count${YELLOW} domínios com WAF NÃO serão escaneados automaticamente${RESET}"
 		echo -e "${YELLOW}[!] Isso previne que você seja bloqueado ou banido!${RESET}"
 		echo -e "${YELLOW}[!] Revise manualmente: ${PINK}$waf_domains${RESET}"
@@ -1309,27 +1351,128 @@ portscan() {
 linkDiscovery() {
 	local alive_domains="$1"
 	local output_folder="$2"
-	
+
 	[ ! -f "$alive_domains" ] || [ ! -s "$alive_domains" ] && return 0
-	
-	mkdir -p "$output_folder" "$output_folder/hakrawler" "$output_folder/waybackurls" 2>/dev/null
+
+	mkdir -p "$output_folder" 2>/dev/null
 	show_step_banner "15" "DESCOBERTA DE LINKS - Crawling URLs" "🔗" "$CYAN"
-	
+
 	local domain_escaped=$(echo "$domain" | sed 's/\./\\./g')
-	
-	# Parallel execution for speed (xargs -P 20)
-	cat "$alive_domains" | xargs -P 20 -I@ bash -c "
-		dnohttps=\$(echo @ | cut -d '/' -f3-)
-		hakrawler --nocolor -all --url @ 2>/dev/null | grep -E 'https?://([^/]*\.)?${domain_escaped}(/|:|$)' >> '$output_folder/hakrawler/\$dnohttps.txt' || true
-		echo @ | waybackurls 2>/dev/null | grep -E 'https?://([^/]*\.)?${domain_escaped}(/|:|$)' >> '$output_folder/waybackurls/\$dnohttps.txt' || true
-	"
-	
-	# Aggregate results
-	cat "$output_folder"/hakrawler/*.txt "$output_folder"/waybackurls/*.txt 2>/dev/null | sort -u > "$output_folder/all.txt"
-	
-	local total=$(cat "$output_folder/all.txt" | wc -l)
-	echo -e "${GREEN}[!] Encontrados ${PINK}$total${GREEN} links${RESET}"
-	
+	local total_domains=$(wc -l < "$alive_domains")
+	local counter=0
+	local temp_all="$output_folder/.all_temp.txt"
+	> "$temp_all"  # Clear temp file
+
+	echo -e "${CYAN}[*] Total de alvos: ${PINK}$total_domains${RESET}"
+	echo -e ""
+
+	# ═══════════════════════════════════════════════════════════════════
+	# 🚀  Fast URL discovery with multiple tools in parallel
+	# ═══════════════════════════════════════════════════════════════════
+
+	# 1. KATANA - Fast modern crawler (10x faster than hakrawler)
+	echo -e "${ORANGE}>>> [1/4] Katana (fast crawler)...${RESET}"
+	if command -v katana &>/dev/null; then
+		# Use stdin for input, simpler and more reliable
+		cat "$alive_domains" | katana -d 2 -jc -kf -silent -nc 2>/dev/null | \
+		grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)" | \
+		tee -a "$temp_all" | \
+		while read -r url; do
+			echo -e "${GREEN}[KATANA] $url${RESET}"
+		done
+	else
+		echo -e "${YELLOW}[!] katana não instalado, pulando...${RESET}"
+	fi
+
+	# 2. WAYBACKURLS - Historical URLs (batch mode = faster)
+	echo -e "${ORANGE}>>> [2/4] Waybackurls (historical)...${RESET}"
+	cat "$alive_domains" | sed 's|https\?://||g' | cut -d'/' -f1 | sort -u | \
+	waybackurls 2>/dev/null | \
+	grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)" | \
+	tee -a "$temp_all" | \
+	while read -r url; do
+		echo -e "${CYAN}[WAYBACK] $url${RESET}"
+	done
+
+	# 3. GAU - GetAllUrls (OTX, Wayback, Common Crawl)
+	echo -e "${ORANGE}>>> [3/4] GAU (multiple sources)...${RESET}"
+	if command -v gau &>/dev/null; then
+		cat "$alive_domains" | sed 's|https\?://||g' | cut -d'/' -f1 | sort -u | \
+		gau --threads 5 --subs 2>/dev/null | \
+		grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)" | \
+		tee -a "$temp_all" | \
+		while read -r url; do
+			echo -e "${PURPLE}[GAU] $url${RESET}"
+		done
+	else
+		echo -e "${YELLOW}[!] gau não instalado, pulando...${RESET}"
+	fi
+
+	# 4. HAKRAWLER - Fallback crawling (fast mode)
+	echo -e "${ORANGE}>>> [4/4] Hakrawler (crawling)...${RESET}"
+	cat "$alive_domains" | hakrawler -t 20 -timeout 10 2>/dev/null | \
+	grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)" | \
+	tee -a "$temp_all" | \
+	while read -r url; do
+		echo -e "${PINK}[HAKRAWL] $url${RESET}"
+	done
+
+	# ═══════════════════════════════════════════════════════════════════
+	# Aggregate and deduplicate
+	# ═══════════════════════════════════════════════════════════════════
+
+	echo -e ""
+	echo -e "${CYAN}[*] Agregando e deduplicando resultados...${RESET}"
+
+	# Merge with existing if re-scan
+	if [ -f "$output_folder/all.txt" ]; then
+		cat "$output_folder/all.txt" >> "$temp_all"
+	fi
+
+	# Basic deduplication
+	sort -u "$temp_all" > "$output_folder/all.txt"
+	rm -f "$temp_all"
+
+	local before_param_dedup=$(wc -l < "$output_folder/all.txt")
+
+	# ═══════════════════════════════════════════════════════════════════
+	# 🚀 FAST Parameter-based URL deduplication (handles 200k+ URLs fast)
+	# URLs with same path+params but different values = same endpoint
+	# ═══════════════════════════════════════════════════════════════════
+
+	# Skip if less than 1000 URLs (not worth the overhead)
+	if [ "$before_param_dedup" -lt 1000 ]; then
+		echo -e "${GREEN}[✓] Total de endpoints únicos: ${PINK}$before_param_dedup${RESET}"
+		timestamp_and_track "$output_folder/all.txt" "url"
+		return
+	fi
+
+	echo -e "${CYAN}[*] Deduplicando ${PINK}$before_param_dedup${CYAN} URLs por parâmetros...${RESET}"
+
+	# FAST METHOD: Use sed to normalize param values, then sort -u
+	# Step 1: Create normalized version (param=VALUE -> param=)
+	# Step 2: Paste original + normalized side by side
+	# Step 3: Sort by normalized, keep first occurrence
+	# Step 4: Extract original URL
+
+	# This is O(n log n) instead of O(n²) - handles 200k URLs in seconds!
+	{
+		paste -d$'\t' \
+			<(sed 's/=[^&]*\([&]\)/=\1/g; s/=[^&]*$/=/' "$output_folder/all.txt") \
+			"$output_folder/all.txt"
+	} | sort -t$'\t' -k1,1 -u | cut -f2 > "$output_folder/all.txt.dedup"
+
+	mv "$output_folder/all.txt.dedup" "$output_folder/all.txt"
+
+	local after_param_dedup=$(wc -l < "$output_folder/all.txt")
+	local param_removed=$((before_param_dedup - after_param_dedup))
+
+	if [ "$param_removed" -gt 0 ]; then
+		echo -e "${CYAN}[⚡] Removidas ${PINK}$param_removed${CYAN} URLs duplicadas${RESET}"
+	fi
+
+	echo -e "${GREEN}[✓] Total de endpoints únicos: ${PINK}$after_param_dedup${RESET}"
+
 	timestamp_and_track "$output_folder/all.txt" "url"
 }
 
@@ -1384,11 +1527,11 @@ findVuln() {
 	# Update templates silently in background
 	nuclei --update-templates >/dev/null 2>&1 &
 
-	echo -e "${ORANGE}╔══════════════════════════════════════════════════════════════╗${RESET}"
-	echo -e "${ORANGE}║  🔥  REAL-TIME VULNERABILITY HUNTING                         ║${RESET}"
-	echo -e "${ORANGE}║  👀  Resultados aparecem INSTANTANEAMENTE na tela!           ║${RESET}"
-	echo -e "${ORANGE}║  ⚡  Viu um bug? REPORTA AGORA enquanto scan continua!       ║${RESET}"
-	echo -e "${ORANGE}╚══════════════════════════════════════════════════════════════╝${RESET}"
+	echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+	echo -e "${ORANGE}🔥 REAL-TIME VULNERABILITY HUNTING${RESET}"
+	echo -e "${CYAN}   👀 Resultados aparecem INSTANTANEAMENTE${RESET}"
+	echo -e "${CYAN}   ⚡ Viu um bug? REPORTA AGORA enquanto scan continua!${RESET}"
+	echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 	echo -e ""
 	echo -e "${CYAN}[*] Rate limit: ${PINK}$NUCLEI_RATE_LIMIT${CYAN} req/sec | Output: ${PINK}REAL-TIME${RESET}"
 	echo -e ""
@@ -1399,8 +1542,7 @@ findVuln() {
 
 	# Get all targets to test
 	local all_targets=$(cat "$alive_domains" | sort -u)
-	#pare
-	ngrep -v "^$" to avoid counting empty lines (echo "" | wc -l returns 1)
+	# grep -v "^$" to avoid counting empty lines (echo "" | wc -l returns 1)
 	local total_count=$(echo "$all_targets" | grep -v "^$" | wc -l)
 
 	# Check what was actually completed (not just started)
@@ -1488,10 +1630,10 @@ findVuln() {
 
 			if [ "$critical_count" -gt 0 ] || [ "$high_count" -gt 0 ]; then
 				echo -e ""
-				echo -e "${ORANGE}╔══════════════════════════════════════════════════════════════╗${RESET}"
-				echo -e "${ORANGE}║  🚨 BUGS DE ALTA SEVERIDADE ENCONTRADOS!                    ║${RESET}"
-				echo -e "${ORANGE}║  👆 FAÇA O REPORT IMEDIATAMENTE!                            ║${RESET}"
-				echo -e "${ORANGE}╚══════════════════════════════════════════════════════════════╝${RESET}"
+				echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+				echo -e "${ORANGE}🚨 BUGS DE ALTA SEVERIDADE ENCONTRADOS!${RESET}"
+				echo -e "${ORANGE}👆 FAÇA O REPORT IMEDIATAMENTE!${RESET}"
+				echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 			fi
 		fi
 	fi
@@ -1734,9 +1876,9 @@ echo -e "${GREEN}[+] Subdomains Alive: ${PINK}$alive_count${RESET}"
 
 # WAF Status (Critical Security Info)
 echo -e ""
-echo -e "${CYAN}╔═══════════════════════════════════════════════════════════╗${RESET}"
-echo -e "${CYAN}║  🛡️  WAF STATUS                                           ║${RESET}"
-echo -e "${CYAN}╚═══════════════════════════════════════════════════════════╝${RESET}"
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+echo -e "${CYAN}🛡️  WAF STATUS${RESET}"
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 echo -e "${GREEN}[+] Domains WITHOUT WAF (scanned): ${PINK}$nowaf_count${RESET}"
 if [ "$waf_count" -gt 0 ]; then
 	echo -e "${ORANGE}[!] Domains WITH WAF (skipped): ${PINK}$waf_count${ORANGE} → ${YELLOW}alive-with-waf.txt${RESET}"
