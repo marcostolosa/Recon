@@ -96,15 +96,13 @@ PIPELINE_STEPS=(
 	"check_active"
 	"waf_detect"
 	"favicon_analysis"
-	"directory_fuzzing"
+	"vulnerability_scan"
+	"screenshots"
 	"cred_stuff"
 	"google_hacking"
 	"github_dorks"
-	"screenshots"
-	"port_scanning"
 	"link_discovery"
 	"endpoints_enum"
-	"vulnerability_scan"
 )
 
 # Steps that always run (discovery stages + incremental testing)
@@ -198,12 +196,13 @@ show_step_banner() {
 	local step_name="$2"
 	local emoji="$3"
 	local color="${4:-$CYAN}"
+	local total_steps=${#PIPELINE_STEPS[@]}
 
-	# Modern minimalist style - cleaner and faster to read
+	# Apple-style minimalist - clean, simple, elegant
 	echo -e ""
-	echo -e "${color}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-	echo -e "${color}${emoji} ${PINK}[${step_number}/17]${color} ${step_name}${RESET}"
-	echo -e "${color}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+	echo -e "   ${color}${emoji}  ${step_name}${RESET}"
+	echo -e "   ${PINK}${step_number}/${total_steps}${RESET}"
+	echo -e ""
 }
 
 check_recent_scan() {
@@ -234,14 +233,13 @@ check_recent_scan() {
 
 	# If scan was less than 6 hours ago, suggest quick mode
 	if [ "$hours_since" -lt 6 ] && [ "$QUICK_MODE" != "True" ]; then
-		echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-		echo -e "${ORANGE}⚡ OTIMIZAÇÃO SUGERIDA${RESET}"
-		echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-		echo -e "${YELLOW}[!] Último scan foi há ${hours_since} horas${RESET}"
-		echo -e "${GREEN}[TIP] Para re-rodar apenas testing (pular discovery), use:${RESET}"
-		echo -e "    ${PINK}./recon_elite.sh -d $domain -w $wordlist -Q${RESET}"
-		echo -e "${GREEN}[TIP] Quick mode economiza ~95 min re-usando descobertas existentes${RESET}"
-		echo -e "${YELLOW}Continuando full scan em 5 segundos (Ctrl+C para cancelar)...${RESET}\n"
+		echo -e ""
+		echo -e "   ${ORANGE}⚡  Quick Mode Available${RESET}"
+		echo -e "   ${CYAN}Last scan was ${hours_since}h ago${RESET}"
+		echo -e ""
+		echo -e "   ${GREEN}Use ${PINK}-Q${GREEN} flag to skip discovery and reuse existing data${RESET}"
+		echo -e "   ${YELLOW}Continuing full scan in 5s...${RESET}"
+		echo -e ""
 		sleep 5
 	fi
 
@@ -370,7 +368,7 @@ printBanner() {
 	echo -e "\t ╚═════╝  ╚═══╝  ╚══════╝      ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚══════╝"
 	echo -e "${RESET}"
 	echo -e "\t\t${PINK}🎯 RECON - Automated Bug Bounty Reconnaissance${RESET}"
-	echo -e "\t\t${CYAN}Version 2.0 ${RESET}"
+	echo -e "\t\t${CYAN}Version 2.0 ELITE | Enhanced with Checkpoint System${RESET}"
 }
 
 show_help() {
@@ -906,20 +904,21 @@ checkActive() {
 
 	if [ "$QUIET" != "True" ]; then
 		# LIVE FEED MODE - Show each new domain as it's discovered
+		# FIX: Use tee to BOTH save and display - avoids subshell issues with while read
 		echo -e "${CYAN}>>>${PURPLE} Running httprobe (live feed enabled)${RESET}"
 		cat "$subdomains" | httprobe 2>/dev/null | \
 		grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)" | \
+		tee -a "$output_folder/alive.txt.new" | \
 		while read line; do
 			echo -e "${GREEN}[NEW] $line${RESET}"
-			echo "$line" >> "$output_folder/alive.txt.new"
 		done
 
 		echo -e "\n${CYAN}>>>${PURPLE} Running httpx (live feed enabled)${RESET}"
 		cat "$subdomains" | httpx --silent --threads 300 2>/dev/null | \
 		grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)" | \
+		tee -a "$output_folder/alive.txt.new" | \
 		while read line; do
 			echo -e "${GREEN}[NEW] $line${RESET}"
-			echo "$line" >> "$output_folder/alive.txt.new"
 		done
 	else
 		# QUIET MODE
@@ -933,7 +932,7 @@ checkActive() {
 		sort -u "$output_folder/alive.txt.new" -o "$output_folder/alive.txt.new"
 
 		# ═══════════════════════════════════════════════════════════════════
-		# 🚀  HTTP/HTTPS Deduplication
+		# 🚀 JHADDIX OPTIMIZATION: HTTP/HTTPS Deduplication
 		# If HTTPS is alive, remove HTTP (same endpoint, prefer secure)
 		# This saves time on WAF detection, screenshots, scanning, etc.
 		# ═══════════════════════════════════════════════════════════════════
@@ -1055,9 +1054,8 @@ wafDetect() {
 	fi
 
 	echo -e ""
-	echo -e "${PINK}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-	echo -e "${PINK}🛡️  SEPARANDO DOMÍNIOS COM/SEM WAF${RESET}"
-	echo -e "${PINK}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+	echo -e "   ${PINK}🛡️  Separating domains by WAF status${RESET}"
+	echo -e ""
 
 	# Parse wafw00f output to extract domains WITH WAF
 	# wafw00f format: "https://domain.com is behind Cloudflare (Cloudflare Inc.)"
@@ -1100,22 +1098,15 @@ wafDetect() {
 	[ -f "$nowaf_domains" ] && nowaf_count=$(cat "$nowaf_domains" | wc -l)
 
 	echo -e ""
-	echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-	echo -e "${ORANGE}⚠️  RESULTADOS DA DETECÇÃO DE WAF${RESET}"
-	echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+	echo -e "   ${ORANGE}⚠️  WAF Detection Results${RESET}"
 	echo -e ""
-	echo -e "${GREEN}[+] Total de domínios ativos: ${PINK}$total_count${RESET}"
-	echo -e "${ORANGE}[!] Domínios COM WAF (manual review): ${PINK}$waf_count${ORANGE} → ${YELLOW}$waf_domains${RESET}"
-	echo -e "${GREEN}[+] Domínios SEM WAF (safe to scan): ${PINK}$nowaf_count${GREEN} → ${YELLOW}$nowaf_domains${RESET}"
+	echo -e "   ${CYAN}Total active: ${PINK}$total_count${RESET}"
+	echo -e "   ${ORANGE}With WAF: ${PINK}$waf_count${RESET}"
+	echo -e "   ${GREEN}Safe to scan: ${PINK}$nowaf_count${RESET}"
 	echo -e ""
 
 	if [ "$waf_count" -gt 0 ]; then
-		echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-		echo -e "${ORANGE}🚨 AVISO DE SEGURANÇA${RESET}"
-		echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-		echo -e "${YELLOW}[!] Os ${PINK}$waf_count${YELLOW} domínios com WAF NÃO serão escaneados automaticamente${RESET}"
-		echo -e "${YELLOW}[!] Isso previne que você seja bloqueado ou banido!${RESET}"
-		echo -e "${YELLOW}[!] Revise manualmente: ${PINK}$waf_domains${RESET}"
+		echo -e "   ${YELLOW}⚠  ${waf_count} domains with WAF will be skipped${RESET}"
 		echo -e ""
 
 		# Show which WAFs were detected
@@ -1186,7 +1177,7 @@ dirFuzz() {
 	
 	[ ! -f "$alive_domains" ] || [ ! -s "$alive_domains" ] && return 0
 	
-	show_step_banner "9" "DIRECTORY FUZZING - Brute Force" "📁" "$YELLOW"
+	show_step_banner "-" "DIRECTORY FUZZING (optional)" "📁" "$YELLOW"
 	mkdir -p "$output_folder" 2>/dev/null
 	
 	for d in $(cat "$alive_domains"); do
@@ -1202,7 +1193,7 @@ credStuff() {
 	
 	mkdir -p "$output_folder/credstuff" 2>/dev/null
 	
-	show_step_banner "10" "CREDENTIAL STUFFING - Hunting Leaks" "🔐" "$ORANGE"
+	show_step_banner "11" "CREDENTIAL STUFFING" "🔐" "$ORANGE"
 	
 	# Incremental credstuff
 	local last_run="$output_folder/credstuff/.last_run_timestamp"
@@ -1230,7 +1221,7 @@ googleHacking() {
 	local output_folder="$1"
 	
 	mkdir -p "$OUTFOLDER/dorks" "$output_folder" 2>/dev/null
-	show_step_banner "11" "GOOGLE DORKS - Gerando Consultas" "🔍" "$CYAN"
+	show_step_banner "12" "GOOGLE DORKS" "🔍" "$CYAN"
 	
 	local dorks_file="$output_folder/dorks.txt"
 	rm -f "$dorks_file"
@@ -1275,7 +1266,7 @@ ghDork() {
 	local output_folder="$1"
 	
 	mkdir -p "$OUTFOLDER/dorks" "$output_folder" 2>/dev/null
-	show_step_banner "12" "GITHUB DORKS - Buscando Secrets" "💻" "$PURPLE"
+	show_step_banner "13" "GITHUB DORKS" "💻" "$PURPLE"
 	
 	for subdomain in $(cat "$DOMAINS" 2>/dev/null | head -50); do
 		local outfile="$output_folder/$subdomain.txt"
@@ -1302,7 +1293,7 @@ screenshots() {
 	
 	[ ! -f "$alive_domains" ] || [ ! -s "$alive_domains" ] && return 0
 	
-	show_step_banner "13" "SCREENSHOTS - Capturando Páginas" "📸" "$CYAN"
+	show_step_banner "10" "SCREENSHOTS" "📸" "$CYAN"
 	
 	# Incremental screenshots
 	local previous_checked="$output_folder/.screenshot_captured.txt"
@@ -1335,7 +1326,7 @@ portscan() {
 	
 	mkdir -p "$output_folder" 2>/dev/null
 	
-	show_step_banner "14" "PORT SCAN - Mapeando Serviços" "🔌" "$ORANGE"
+	show_step_banner "-" "PORT SCAN (optional)" "🔌" "$ORANGE"
 	
 	if [ "$QUIET" != "True" ]; then
 		nmap -iL "$domains" --top-ports 5000 --max-rate=50000 -oG "$output_folder/nmap.txt" 2>/dev/null || true
@@ -1355,7 +1346,7 @@ linkDiscovery() {
 	[ ! -f "$alive_domains" ] || [ ! -s "$alive_domains" ] && return 0
 
 	mkdir -p "$output_folder" 2>/dev/null
-	show_step_banner "15" "DESCOBERTA DE LINKS - Crawling URLs" "🔗" "$CYAN"
+	show_step_banner "14" "LINK DISCOVERY" "🔗" "$CYAN"
 
 	local domain_escaped=$(echo "$domain" | sed 's/\./\\./g')
 	local total_domains=$(wc -l < "$alive_domains")
@@ -1367,19 +1358,21 @@ linkDiscovery() {
 	echo -e ""
 
 	# ═══════════════════════════════════════════════════════════════════
-	# 🚀  Fast URL discovery with multiple tools in parallel
+	# 🚀 JHADDIX-STYLE: Fast URL discovery with multiple tools in parallel
 	# ═══════════════════════════════════════════════════════════════════
 
 	# 1. KATANA - Fast modern crawler (10x faster than hakrawler)
 	echo -e "${ORANGE}>>> [1/4] Katana (fast crawler)...${RESET}"
 	if command -v katana &>/dev/null; then
 		# Use stdin for input, simpler and more reliable
-		cat "$alive_domains" | katana -d 2 -jc -kf -silent -nc 2>/dev/null | \
-		grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)" | \
-		tee -a "$temp_all" | \
-		while read -r url; do
+		# Remove -silent to see if katana is actually finding URLs
+		local katana_count=0
+		while IFS= read -r url; do
+			echo "$url" >> "$temp_all"
 			echo -e "${GREEN}[KATANA] $url${RESET}"
-		done
+			((katana_count++))
+		done < <(cat "$alive_domains" | katana -d 2 -jc -kf -nc 2>/dev/null | grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)")
+		echo -e "${CYAN}[*] Katana encontrou: ${PINK}$katana_count${CYAN} URLs${RESET}"
 	else
 		echo -e "${YELLOW}[!] katana não instalado, pulando...${RESET}"
 	fi
@@ -1474,36 +1467,215 @@ linkDiscovery() {
 	echo -e "${GREEN}[✓] Total de endpoints únicos: ${PINK}$after_param_dedup${RESET}"
 
 	timestamp_and_track "$output_folder/all.txt" "url"
+
+	# ═══════════════════════════════════════════════════════════════════
+	# Separate URLs with/without parameters for different tools
+	# ═══════════════════════════════════════════════════════════════════
+
+	echo -e "${CYAN}[*] Separando URLs para ferramentas específicas...${RESET}"
+
+	# URLs WITH parameters (for dalfox, sqlmap, XSS/SQLi testing)
+	grep -E '\?' "$output_folder/all.txt" > "$output_folder/urls-with-params.txt" 2>/dev/null || touch "$output_folder/urls-with-params.txt"
+
+	# URLs WITHOUT parameters (for nuclei, basic scanning)
+	grep -vE '\?' "$output_folder/all.txt" > "$output_folder/urls-no-params.txt" 2>/dev/null || touch "$output_folder/urls-no-params.txt"
+
+	local with_params=$(wc -l < "$output_folder/urls-with-params.txt")
+	local no_params=$(wc -l < "$output_folder/urls-no-params.txt")
+
+	echo -e "${GREEN}[+] URLs com parâmetros: ${PINK}$with_params${GREEN} → urls-with-params.txt (dalfox/sqlmap)${RESET}"
+	echo -e "${GREEN}[+] URLs sem parâmetros: ${PINK}$no_params${GREEN} → urls-no-params.txt (nuclei)${RESET}"
 }
 
 endpointsEnumeration() {
 	local alive_domains="$1"
 	local output_folder="$2"
-	
+
 	[ ! -f "$alive_domains" ] || [ ! -s "$alive_domains" ] && return 0
-	
-	show_step_banner "16" "ENUMERAÇÃO DE ENDPOINTS - Caça a Parâmetros" "📡" "$PURPLE"
-	
+
+	show_step_banner "15" "ENDPOINT ENUMERATION" "📡" "$PURPLE"
+
 	local domain_escaped=$(echo "$domain" | sed 's/\./\\./g')
-	mkdir -p "$output_folder/js" 2>/dev/null
-	
-	# ParamSpider in stream mode (fix for path issue)
-	while read -r d; do
-		echo -e "${CYAN}>>> ParamSpider on $d${RESET}"
-		python3 "$SCRIPTPATH/tools/ParamSpider/paramspider.py" -d "$d" -s 2>/dev/null | grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)" >> "$output_folder/all.txt" || true
-	done < "$alive_domains"
-	
-	# JS enumeration
-	xargs -P 20 -a "$DOMAINS" -I@ bash -c "
-		nc -w1 -z -v @ 443 2>/dev/null && echo @ | xargs -I{} bash -c '
-			gospider -a -s \"https://{}\" -d 2 2>/dev/null | grep -Eo \"(http|https)://[^/\\\"]*\.js+\" | grep -E \"${domain_escaped}\"
-		'
-	" >> "$output_folder/js/js.txt" 2>/dev/null || true
-	
-	cat "$alive_domains" | waybackurls 2>/dev/null | grep -iE '\.js' | grep -iEv '(\.jsp|\.json)' | grep -E "$domain_escaped" >> "$output_folder/js/js.txt" || true
+	mkdir -p "$output_folder/js" "$output_folder/secrets" 2>/dev/null
+
+	# ═══════════════════════════════════════════════════════════════════
+	# 1. DISCOVER JS FILES (multiple sources)
+	# ═══════════════════════════════════════════════════════════════════
+	echo -e "${CYAN}[*] Descobrindo arquivos JS...${RESET}"
+
+	# Gospider for JS discovery
+	cat "$alive_domains" | while read -r target_url; do
+		gospider -a -s "$target_url" -d 2 --no-redirect 2>/dev/null | \
+		grep -Eo "(http|https)://[^/\"']*\.js" | \
+		grep -E "$domain_escaped"
+	done >> "$output_folder/js/js.txt" 2>/dev/null || true
+
+	# Waybackurls for historical JS
+	cat "$alive_domains" | sed 's|https\?://||g' | cut -d'/' -f1 | sort -u | \
+	waybackurls 2>/dev/null | \
+	grep -iE '\.js$' | grep -ivE '(\.jsp|\.json)' | \
+	grep -E "$domain_escaped" >> "$output_folder/js/js.txt" 2>/dev/null || true
+
+	# Deduplicate JS URLs
 	sort -u "$output_folder/js/js.txt" -o "$output_folder/js/js.txt" 2>/dev/null
-	
-	cat "$output_folder/js/js.txt" | anti-burl | awk '{print $4}' | sort -u >> "$output_folder/js/AliveJS.txt" 2>/dev/null || true
+
+	# Check which JS files are alive (fast check with httpx)
+	if [ -f "$output_folder/js/js.txt" ] && [ -s "$output_folder/js/js.txt" ]; then
+		cat "$output_folder/js/js.txt" | httpx -silent -mc 200 -ct | \
+		grep -i "javascript\|text" | awk '{print $1}' | \
+		sort -u > "$output_folder/js/AliveJS.txt" 2>/dev/null || \
+		cat "$output_folder/js/js.txt" > "$output_folder/js/AliveJS.txt"
+	fi
+
+	local js_count=$([ -f "$output_folder/js/AliveJS.txt" ] && wc -l < "$output_folder/js/AliveJS.txt" || echo "0")
+	echo -e "${GREEN}[+] Encontrados ${PINK}$js_count${GREEN} JS files vivos${RESET}"
+
+	# ═══════════════════════════════════════════════════════════════════
+	# 2. IN-MEMORY JS ANALYSIS (curl -s | pipe - NO DOWNLOAD!)
+	# Extract: endpoints, secrets, new domains - all in streaming mode
+	# ═══════════════════════════════════════════════════════════════════
+
+	if [ -f "$output_folder/js/AliveJS.txt" ] && [ -s "$output_folder/js/AliveJS.txt" ]; then
+		echo -e ""
+		echo -e "   ${ORANGE}🔍  JavaScript Analysis${RESET}"
+		echo -e "   ${CYAN}In-memory analysis, no downloads${RESET}"
+		echo -e ""
+
+		local js_analyzed=0
+		local endpoints_found=0
+		local secrets_found=0
+		local new_domains_found=0
+
+		# Initialize output files
+		> "$output_folder/js/endpoints_from_js.txt"
+		> "$output_folder/secrets/secrets_from_js.txt"
+		> "$output_folder/js/domains_from_js.txt"
+
+		while IFS= read -r js_url; do
+			[ -z "$js_url" ] && continue
+			((js_analyzed++))
+
+			local js_name=$(echo "$js_url" | sed 's|.*/||' | cut -c1-50)
+			echo -e "${CYAN}[${js_analyzed}/${js_count}] Analyzing: ${YELLOW}$js_name${RESET}"
+
+			# Fetch JS content ONCE, analyze in memory with multiple tools
+			local js_content=$(curl -s -L -m 15 "$js_url" 2>/dev/null)
+
+			# Skip if empty or binary
+			[ -z "$js_content" ] && continue
+			if echo "$js_content" | head -c 100 | grep -q $'\x00'; then
+				echo -e "${YELLOW}  [skip] Binary file${RESET}"
+				continue
+			fi
+
+			# ─────────────────────────────────────────────────────────────
+			# 2a. EXTRACT ENDPOINTS (LinkFinder patterns in pure bash)
+			# ─────────────────────────────────────────────────────────────
+			local endpoints=$(echo "$js_content" | \
+				grep -oE '["'"'"'](/[a-zA-Z0-9_/?=&.-]+)["'"'"']' | \
+				tr -d "\"'" | \
+				grep -E '^/' | \
+				grep -vE '\.(css|png|jpg|gif|svg|ico|woff|ttf|eot)$' | \
+				sort -u)
+
+			if [ -n "$endpoints" ]; then
+				local ep_count=$(echo "$endpoints" | wc -l)
+				endpoints_found=$((endpoints_found + ep_count))
+				echo "$endpoints" >> "$output_folder/js/endpoints_from_js.txt"
+				echo -e "${GREEN}  [+] ${PINK}$ep_count${GREEN} endpoints${RESET}"
+			fi
+
+			# Also extract full URLs from JS
+			echo "$js_content" | \
+				grep -oE 'https?://[a-zA-Z0-9./?=_&-]+' | \
+				grep -E "$domain_escaped" | \
+				sort -u >> "$output_folder/js/endpoints_from_js.txt"
+
+			# ─────────────────────────────────────────────────────────────
+			# 2b. EXTRACT SECRETS (API keys, tokens, credentials)
+			# ─────────────────────────────────────────────────────────────
+			local secrets=""
+
+			# AWS Keys
+			secrets+=$(echo "$js_content" | grep -oE 'AKIA[0-9A-Z]{16}' 2>/dev/null)$'\n'
+			# Google API
+			secrets+=$(echo "$js_content" | grep -oE 'AIza[0-9A-Za-z_-]{35}' 2>/dev/null)$'\n'
+			# Private Keys
+			secrets+=$(echo "$js_content" | grep -oE '-----BEGIN (RSA |EC |DSA )?PRIVATE KEY-----' 2>/dev/null)$'\n'
+			# Generic API keys
+			secrets+=$(echo "$js_content" | grep -oiE '(api[_-]?key|apikey|api_secret|auth_token|access_token)["\s]*[:=]["\s]*[a-zA-Z0-9_-]{20,}' 2>/dev/null)$'\n'
+			# Firebase URLs
+			secrets+=$(echo "$js_content" | grep -oE 'https://[a-z0-9-]+\.firebaseio\.com' 2>/dev/null)$'\n'
+			# Slack tokens
+			secrets+=$(echo "$js_content" | grep -oE 'xox[baprs]-[0-9a-zA-Z-]+' 2>/dev/null)$'\n'
+			# JWT tokens
+			secrets+=$(echo "$js_content" | grep -oE 'eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*' 2>/dev/null)$'\n'
+
+			secrets=$(echo "$secrets" | grep -v '^$' | sort -u)
+			if [ -n "$secrets" ]; then
+				local secret_count=$(echo "$secrets" | wc -l)
+				secrets_found=$((secrets_found + secret_count))
+				echo -e "${ORANGE}  🚨 ${PINK}$secret_count${ORANGE} SECRETS FOUND!${RESET}"
+				echo "=== From: $js_url ===" >> "$output_folder/secrets/secrets_from_js.txt"
+				echo "$secrets" >> "$output_folder/secrets/secrets_from_js.txt"
+				echo "" >> "$output_folder/secrets/secrets_from_js.txt"
+			fi
+
+			# ─────────────────────────────────────────────────────────────
+			# 2c. EXTRACT NEW DOMAINS/SUBDOMAINS
+			# ─────────────────────────────────────────────────────────────
+			local new_domains=$(echo "$js_content" | \
+				grep -oE '[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.'"$domain_escaped" | \
+				sort -u)
+
+			if [ -n "$new_domains" ]; then
+				local dom_count=$(echo "$new_domains" | wc -l)
+				new_domains_found=$((new_domains_found + dom_count))
+				echo "$new_domains" >> "$output_folder/js/domains_from_js.txt"
+			fi
+
+		done < "$output_folder/js/AliveJS.txt"
+
+		# Deduplicate all results
+		sort -u "$output_folder/js/endpoints_from_js.txt" -o "$output_folder/js/endpoints_from_js.txt" 2>/dev/null
+		sort -u "$output_folder/js/domains_from_js.txt" -o "$output_folder/js/domains_from_js.txt" 2>/dev/null
+
+		# Merge endpoints with main all.txt
+		cat "$output_folder/js/endpoints_from_js.txt" >> "$output_folder/all.txt" 2>/dev/null
+		sort -u "$output_folder/all.txt" -o "$output_folder/all.txt" 2>/dev/null
+
+		# Add new domains to main subdomain list
+		if [ -s "$output_folder/js/domains_from_js.txt" ]; then
+			cat "$output_folder/js/domains_from_js.txt" >> "$DOMAINS"
+			sort -u "$DOMAINS" -o "$DOMAINS"
+		fi
+
+		# Summary
+		echo -e ""
+		echo -e "   ${GREEN}✓  JS Analysis Complete${RESET}"
+		echo -e "   ${CYAN}Files: ${PINK}$js_analyzed${CYAN} | Endpoints: ${PINK}$(wc -l < "$output_folder/js/endpoints_from_js.txt" 2>/dev/null || echo 0)${CYAN} | Domains: ${PINK}$(wc -l < "$output_folder/js/domains_from_js.txt" 2>/dev/null || echo 0)${RESET}"
+
+		if [ "$secrets_found" -gt 0 ]; then
+			echo -e "   ${ORANGE}🚨 Secrets found: ${PINK}$secrets_found${ORANGE} - validate immediately!${RESET}"
+		fi
+	fi
+
+	# ═══════════════════════════════════════════════════════════════════
+	# 3. PARAMSPIDER - Discover parameters in URLs
+	# ═══════════════════════════════════════════════════════════════════
+	echo -e ""
+	echo -e "${CYAN}[*] Running ParamSpider for parameter discovery...${RESET}"
+
+	while read -r d; do
+		python3 "$SCRIPTPATH/tools/ParamSpider/paramspider.py" -d "$d" -s 2>/dev/null | \
+		grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)" >> "$output_folder/all.txt" 2>/dev/null || true
+	done < "$alive_domains"
+
+	# Final deduplication
+	sort -u "$output_folder/all.txt" -o "$output_folder/all.txt" 2>/dev/null
+
+	local total_endpoints=$([ -f "$output_folder/all.txt" ] && wc -l < "$output_folder/all.txt" || echo "0")
+	echo -e "${GREEN}[✓] Total endpoints descobertos: ${PINK}$total_endpoints${RESET}"
 }
 
 findVuln() {
@@ -1513,7 +1685,7 @@ findVuln() {
 	[ ! -f "$alive_domains" ] || [ ! -s "$alive_domains" ] && return 0
 
 	mkdir -p "$output_folder" "$output_folder/xss-discovery" 2>/dev/null
-	show_step_banner "17" "SCAN DE VULNERABILIDADES - Hunting Bugs" "🔥" "$ORANGE"
+	show_step_banner "9" "VULNERABILITY SCAN" "🔥" "$ORANGE"
 
 	# ═══════════════════════════════════════════════════════════════════
 	# 🔥 REAL-TIME VULNERABILITY SCANNING 
@@ -1527,13 +1699,9 @@ findVuln() {
 	# Update templates silently in background
 	nuclei --update-templates >/dev/null 2>&1 &
 
-	echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-	echo -e "${ORANGE}🔥 REAL-TIME VULNERABILITY HUNTING${RESET}"
-	echo -e "${CYAN}   👀 Resultados aparecem INSTANTANEAMENTE${RESET}"
-	echo -e "${CYAN}   ⚡ Viu um bug? REPORTA AGORA enquanto scan continua!${RESET}"
-	echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 	echo -e ""
-	echo -e "${CYAN}[*] Rate limit: ${PINK}$NUCLEI_RATE_LIMIT${CYAN} req/sec | Output: ${PINK}REAL-TIME${RESET}"
+	echo -e "   ${ORANGE}🔥  Vulnerability Hunting${RESET}"
+	echo -e "   ${CYAN}Real-time output | ${PINK}${NUCLEI_RATE_LIMIT}${CYAN} req/sec${RESET}"
 	echo -e ""
 
 	# ═══════════════════════════════════════════════════════════════════
@@ -1542,7 +1710,7 @@ findVuln() {
 
 	# Get all targets to test
 	local all_targets=$(cat "$alive_domains" | sort -u)
-	# grep -v "^$" to avoid counting empty lines (echo "" | wc -l returns 1)
+	# BUG FIX: grep -v "^$" to avoid counting empty lines (echo "" | wc -l returns 1)
 	local total_count=$(echo "$all_targets" | grep -v "^$" | wc -l)
 
 	# Check what was actually completed (not just started)
@@ -1550,7 +1718,7 @@ findVuln() {
 	touch "$completed_file" 2>/dev/null
 
 	# Find targets that haven't been COMPLETED yet
-	# comm requires BOTH inputs to be sorted - re-sort to guarantee consistency
+	# BUG FIX: comm requires BOTH inputs to be sorted - re-sort to guarantee consistency
 	local pending_targets=$(comm -23 <(echo "$all_targets" | sort) <(sort "$completed_file" 2>/dev/null))
 	local pending_count=$(echo "$pending_targets" | grep -v "^$" | wc -l)
 
@@ -1568,17 +1736,15 @@ findVuln() {
 		echo "$pending_targets" | grep -v "^$" > "$output_folder/.pending_targets.txt"
 
 
-		echo -e "${ORANGE}════════════════════════════════════════════════════════════${RESET}"
-		echo -e "${ORANGE}  🔥 NUCLEI SCAN INICIANDO - RESULTADOS EM TEMPO REAL 🔥    ${RESET}"
-		echo -e "${ORANGE}════════════════════════════════════════════════════════════${RESET}"
+		echo -e ""
+		echo -e "   ${ORANGE}🔥  Nuclei Scan${RESET}"
+		echo -e "   ${CYAN}Real-time vulnerability detection${RESET}"
 		echo -e ""
 
 		nuclei -l "$output_folder/.pending_targets.txt" \
 			-t "$HOME/nuclei-templates/" \
 			-rl "$NUCLEI_RATE_LIMIT" \
 			-c 50 \
-			-stats \
-			-si 30 \
 			-o "$output_folder/nuclei_findings.txt" \
 			2>&1 | while IFS= read -r line; do
 				# Colorize severity levels for instant visual feedback
@@ -1611,9 +1777,8 @@ findVuln() {
 		rm -f "$output_folder/.pending_targets.txt"
 
 		echo -e ""
-		echo -e "${GREEN}════════════════════════════════════════════════════════════${RESET}"
-		echo -e "${GREEN}  ✅ NUCLEI SCAN COMPLETO!                                   ${RESET}"
-		echo -e "${GREEN}════════════════════════════════════════════════════════════${RESET}"
+		echo -e "   ${GREEN}✓  Nuclei scan complete${RESET}"
+		echo -e ""
 
 		# Show summary of findings
 		if [ -f "$output_folder/nuclei_findings.txt" ] && [ -s "$output_folder/nuclei_findings.txt" ]; then
@@ -1630,10 +1795,7 @@ findVuln() {
 
 			if [ "$critical_count" -gt 0 ] || [ "$high_count" -gt 0 ]; then
 				echo -e ""
-				echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-				echo -e "${ORANGE}🚨 BUGS DE ALTA SEVERIDADE ENCONTRADOS!${RESET}"
-				echo -e "${ORANGE}👆 FAÇA O REPORT IMEDIATAMENTE!${RESET}"
-				echo -e "${ORANGE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+				echo -e "   ${ORANGE}🚨  High severity bugs found - report immediately!${RESET}"
 			fi
 		fi
 	fi
@@ -1665,6 +1827,67 @@ findVuln() {
 
 		echo -e "${CYAN}>>> Checking LFI patterns...${RESET}"
 		grepVuln lfi_parameters[@] "$(cat $list)" "$output_folder/lfi.txt"
+
+		# ═══════════════════════════════════════════════════════════════════
+		# 🔥 COMMIX - Command Injection Exploitation
+		# Tests URLs with parameters for OS command injection vulnerabilities
+		# ═══════════════════════════════════════════════════════════════════
+		local urls_with_params="$OUTFOLDER/link-discovery/urls-with-params.txt"
+		if [ -f "$urls_with_params" ] && [ -s "$urls_with_params" ] && command -v commix &>/dev/null; then
+			echo -e ""
+			echo -e "   ${ORANGE}🔥  Commix${RESET}"
+			echo -e "   ${CYAN}Command injection scanner${RESET}"
+			echo -e ""
+
+			local commix_output="$output_folder/commix"
+			mkdir -p "$commix_output" 2>/dev/null
+
+			local param_count=$(wc -l < "$urls_with_params")
+			echo -e "${CYAN}[*] Testing ${PINK}$param_count${CYAN} URLs with parameters for command injection...${RESET}"
+
+			# Test each URL with commix (batch mode, no interaction)
+			local commix_counter=0
+			while IFS= read -r url; do
+				[ -z "$url" ] && continue
+				((commix_counter++))
+
+				# Extract domain for output file naming
+				local url_domain=$(echo "$url" | sed 's|https\?://||' | cut -d'/' -f1 | tr ':' '_')
+
+				echo -e "${CYAN}[${commix_counter}/${param_count}] Testing: ${YELLOW}$url${RESET}"
+
+				# Run commix in batch mode with timeout
+				# --batch: automatic mode (no user interaction)
+				# --level=1: basic tests (faster)
+				# --output-dir: save results
+				timeout 60 commix --url="$url" \
+					--batch \
+					--level=1 \
+					--output-dir="$commix_output" \
+					2>/dev/null | tee -a "$commix_output/commix_scan.log" | \
+				while IFS= read -r line; do
+					if echo "$line" | grep -qiE "(vulnerable|injection|exploitable)"; then
+						echo -e "${ORANGE}🚨 [COMMIX] VULNERABILITY FOUND: $line${RESET}"
+						echo "$url" >> "$commix_output/vulnerable_urls.txt"
+					fi
+				done
+
+			done < "$urls_with_params"
+
+			# Summary
+			if [ -f "$commix_output/vulnerable_urls.txt" ]; then
+				local vuln_count=$(wc -l < "$commix_output/vulnerable_urls.txt")
+				echo -e ""
+				echo -e "${ORANGE}🚨 COMMIX encontrou ${PINK}$vuln_count${ORANGE} URLs vulneráveis a Command Injection!${RESET}"
+				echo -e "${ORANGE}   Resultados salvos em: ${YELLOW}$commix_output/${RESET}"
+			else
+				echo -e "${GREEN}[✓] COMMIX scan completo - nenhuma injeção de comando encontrada${RESET}"
+			fi
+		else
+			if ! command -v commix &>/dev/null; then
+				echo -e "${YELLOW}[!] commix não instalado - pulando teste de command injection${RESET}"
+			fi
+		fi
 
 		# gf patterns if available
 		if command -v gf &>/dev/null; then
@@ -1810,34 +2033,46 @@ run_step "favicon_analysis" favAnalysis "$OUTFOLDER/subdomains/alive.txt" "$OUTF
 # Define the safe target list (domains WITHOUT WAF protection)
 SAFE_TARGETS="$OUTFOLDER/subdomains/alive-no-waf.txt"
 
-# Fallback to alive.txt if alive-no-waf.txt doesn't exist yet
-if [ ! -f "$SAFE_TARGETS" ]; then
+# Fallback to alive.txt if alive-no-waf.txt doesn't exist OR is empty
+# CRITICAL FIX: Must check -s (has content), not just -f (exists)
+# Otherwise if ALL domains have WAF, alive-no-waf.txt exists but is empty = nothing scanned!
+if [ ! -f "$SAFE_TARGETS" ] || [ ! -s "$SAFE_TARGETS" ]; then
+	echo -e "${YELLOW}[!] Nenhum domínio sem WAF - usando alive.txt (com cuidado!)${RESET}"
 	SAFE_TARGETS="$OUTFOLDER/subdomains/alive.txt"
 fi
 
-# Phase 3: Intelligence Gathering
+# Final check - if still empty, warn user
+if [ ! -s "$SAFE_TARGETS" ]; then
+	echo -e "${ORANGE}[!] AVISO: Nenhum alvo vivo encontrado para scanning!${RESET}"
+fi
+
+# ═══════════════════════════════════════════════════════════════════
+# Phase 3: NUCLEI SCAN FIRST (on clean deduplicated targets)
+# Run Nuclei early to find quick wins while other tools continue
+# ═══════════════════════════════════════════════════════════════════
+run_step "vulnerability_scan" findVuln "$SAFE_TARGETS" "$OUTFOLDER/vuln"
+
+# Phase 4: Intelligence Gathering (parallel to manual vuln review)
+run_step "screenshots" screenshots "$SAFE_TARGETS" "$OUTFOLDER/$domain-screenshots"
 run_step "cred_stuff" credStuff 500 "$OUTFOLDER/dorks"
 run_step "google_hacking" googleHacking "$OUTFOLDER/dorks/google-dorks"
 run_step "github_dorks" ghDork "$OUTFOLDER/dorks/github-dorks"
-run_step "screenshots" screenshots "$SAFE_TARGETS" "$OUTFOLDER/$domain-screenshots"
 
-# Phase 4: Active Scanning (optional - comment out if not needed)
-# run_step "port_scanning" portscan "$DOMAINS" "$OUTFOLDER/DNS/ip_only.txt" "$OUTFOLDER/portscan"
-
-# Phase 5: URL Discovery (uses safe targets to avoid WAF blocks)
+# Phase 5: Deep URL/JS Discovery (after Nuclei finds quick wins)
 run_step "link_discovery" linkDiscovery "$SAFE_TARGETS" "$OUTFOLDER/link-discovery"
 run_step "endpoints_enum" endpointsEnumeration "$SAFE_TARGETS" "$OUTFOLDER/link-discovery"
 
-# Phase 6: Vulnerability Scanning (ONLY on non-WAF domains!)
-run_step "vulnerability_scan" findVuln "$SAFE_TARGETS" "$OUTFOLDER/vuln"
+# Phase 6: Port Scanning (optional - uncomment if needed)
+# run_step "port_scanning" portscan "$DOMAINS" "$OUTFOLDER/DNS/ip_only.txt" "$OUTFOLDER/portscan"
 
 # ═════════════════════════════════════════════════════════════
 #                      FINAL SUMMARY REPORT
 # ═════════════════════════════════════════════════════════════
 
-echo -e "\n${PINK}════════════════════════════════════════════════════════════${RESET}"
-echo -e "${PINK}                   FINAL RESULTS - CVE-HUNTERS              ${RESET}"
-echo -e "${PINK}════════════════════════════════════════════════════════════${RESET}\n"
+echo -e ""
+echo -e "   ${PINK}📊  Final Results${RESET}"
+echo -e "   ${CYAN}CVE-Hunters Reconnaissance Summary${RESET}"
+echo -e ""
 
 # Count results (NOT using 'local' - we're in main script body, not inside a function)
 org="$(echo $domain | cut -d '.' -f1)"
@@ -1876,15 +2111,8 @@ echo -e "${GREEN}[+] Subdomains Alive: ${PINK}$alive_count${RESET}"
 
 # WAF Status (Critical Security Info)
 echo -e ""
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-echo -e "${CYAN}🛡️  WAF STATUS${RESET}"
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-echo -e "${GREEN}[+] Domains WITHOUT WAF (scanned): ${PINK}$nowaf_count${RESET}"
-if [ "$waf_count" -gt 0 ]; then
-	echo -e "${ORANGE}[!] Domains WITH WAF (skipped): ${PINK}$waf_count${ORANGE} → ${YELLOW}alive-with-waf.txt${RESET}"
-else
-	echo -e "${GREEN}[+] Domains WITH WAF: ${PINK}0${GREEN} (none detected)${RESET}"
-fi
+echo -e "   ${CYAN}🛡️  WAF Status${RESET}"
+echo -e "   ${GREEN}Safe: ${PINK}$nowaf_count${RESET}   ${ORANGE}Protected: ${PINK}$waf_count${RESET}"
 echo -e ""
 
 if [ "$takeover_count" -gt 0 ]; then
@@ -1919,11 +2147,10 @@ if [ -f "$OUTFOLDER/.trackers/new_targets_last_24h.txt" ]; then
 	fi
 fi
 
-echo -e "\n${GREEN}[+] All results saved in: ${PINK}$OUTFOLDER${RESET}"
-echo -e "${YELLOW}[!] Check dorks manually for best results!${RESET}"
-echo -e "\n${PINK}════════════════════════════════════════════════════════════${RESET}"
-echo -e "${GREEN}                        SCAN COMPLETE! 😁                    ${RESET}"
-echo -e "${PINK}════════════════════════════════════════════════════════════${RESET}\n"
+echo -e ""
+echo -e "   ${GREEN}✓  Scan complete${RESET}"
+echo -e "   ${CYAN}Results saved to ${PINK}$OUTFOLDER${RESET}"
+echo -e ""
 
 # Done!
 exit 0
