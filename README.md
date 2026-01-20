@@ -33,7 +33,7 @@ CVE-Hunters is a comprehensive reconnaissance automation framework that orchestr
 ```bash
 git clone https://github.com/marcostolosa/Recon.git
 cd Recon/
-chmod +x subs.sh installation.sh
+chmod +x recon.sh installation.sh
 ./installation.sh
 ```
 
@@ -85,13 +85,13 @@ sudo pacman -S masscan nmap dnsrecon
 ### Basic Scan
 
 ```bash
-./subs.sh -d target.com -w wordlists/common.txt
+./recon.sh -d target.com -w wordlists/common.txt
 ```
 
 ### Complete Scan with All Features
 
 ```bash
-./subs.sh -d target.com -w wordlists/big.txt \
+./recon.sh -d target.com -w wordlists/big.txt \
   -g <github-api-key> \
   -s <shodan-api-key> \
   -f \
@@ -102,24 +102,24 @@ sudo pacman -S masscan nmap dnsrecon
 ### Quiet Mode (Minimal Output)
 
 ```bash
-./subs.sh -d target.com -w wordlists/common.txt -q
+./recon.sh -d target.com -w wordlists/common.txt -q
 ```
 
 ### Custom Output Directory
 
 ```bash
-./subs.sh -d target.com -w wordlists/big.txt -o /custom/path
+./recon.sh -d target.com -w wordlists/big.txt -o /custom/path
 ```
 
 ### Resume Interrupted Scan
 
 ```bash
 # First run - interrupted after 5 stages
-./subs.sh -d target.com -w wordlists/common.txt
+./recon.sh -d target.com -w wordlists/common.txt
 ^C  # Ctrl+C
 
 # Second run - continues from stage 6 automatically
-./subs.sh -d target.com -w wordlists/common.txt
+./recon.sh -d target.com -w wordlists/common.txt
 # Output: [⏭️ ] Etapa 'asn_enum' já completa, pulando...
 ```
 
