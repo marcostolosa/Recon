@@ -511,17 +511,18 @@ subdomainEnumeration() {
 		echo -e "${YELLOW}[!] All subdomains will be saved in ${PINK}$output_folder/subdomains.txt${RESET}"
 
 		echo -e "${CYAN}>>>${PURPLE} Running assetfinder 🔍${RESET}"
-		assetfinder "$target" 2>/dev/null | tee -a "$output_folder/subdomains.txt.new" || \
-		$GOPATH/bin/assetfinder "$target" 2>/dev/null | tee -a "$output_folder/subdomains.txt.new"
+		timeout 120 assetfinder "$target" 2>/dev/null | tee -a "$output_folder/subdomains.txt.new" || \
+		timeout 120 $GOPATH/bin/assetfinder "$target" 2>/dev/null | tee -a "$output_folder/subdomains.txt.new"
 
 		echo -e "\n${CYAN}>>>${PURPLE} Running subfinder 🔍${RESET}"
-		subfinder --silent -d "$target" 2>/dev/null | tee -a "$output_folder/subdomains.txt.new" || \
-		$GOPATH/bin/subfinder --silent -d "$target" 2>/dev/null | tee -a "$output_folder/subdomains.txt.new"
+		timeout 180 subfinder --silent -d "$target" 2>/dev/null | tee -a "$output_folder/subdomains.txt.new" || \
+		timeout 180 $GOPATH/bin/subfinder --silent -d "$target" 2>/dev/null | tee -a "$output_folder/subdomains.txt.new"
 
 		echo -e "\n${CYAN}>>>${PURPLE} Running amass (passive) 🔍${RESET}"
 		export GO111MODULE=auto
-		amass enum --passive -d "$target" 2>/dev/null | tee -a "$output_folder/subdomains.txt.new" || \
-		$GOPATH/bin/amass enum --passive -d "$target" 2>/dev/null | tee -a "$output_folder/subdomains.txt.new"
+		# FIX: < /dev/null prevents interactive prompts (API key, config wizard)
+		timeout 300 amass enum --passive -silent -d "$target" < /dev/null 2>/dev/null | tee -a "$output_folder/subdomains.txt.new" || \
+		timeout 300 $GOPATH/bin/amass enum --passive -silent -d "$target" < /dev/null 2>/dev/null | tee -a "$output_folder/subdomains.txt.new"
 
 		echo -e "\n${CYAN}>>>${PURPLE} Getting Subdomains from RapidDNS.io 🔍${RESET}"
 		timeout 30 curl -s "https://rapiddns.io/subdomain/$target?full=1#result" 2>/dev/null | \
@@ -543,23 +544,23 @@ subdomainEnumeration() {
 		jq -r '.[].name_value' 2>/dev/null | sed 's/\*\.//g' | sort -u | tee -a "$output_folder/subdomains.txt.new"
 
 		echo -e "\n${CYAN}>>>${PURPLE} Running findomain 🔍${RESET}"
-		findomain -t "$target" -q -u "$SCRIPTPATH/findomain-$target.txt" 2>/dev/null || \
-		$GOPATH/bin/findomain -t "$target" -q -u "$SCRIPTPATH/findomain-$target.txt" 2>/dev/null
+		timeout 120 findomain -t "$target" -q -u "$SCRIPTPATH/findomain-$target.txt" 2>/dev/null || \
+		timeout 120 $GOPATH/bin/findomain -t "$target" -q -u "$SCRIPTPATH/findomain-$target.txt" 2>/dev/null
 		[ -f "$SCRIPTPATH/findomain-$target.txt" ] && cat "$SCRIPTPATH/findomain-$target.txt" | tee -a "$output_folder/subdomains.txt.new"
 		[ -f "$SCRIPTPATH/findomain-$target.txt" ] && rm "$SCRIPTPATH/findomain-$target.txt"
 
 		echo -e "\n${CYAN}>>>${PURPLE} Running SubDomainizer 🔍${RESET}"
-		python3 "$SCRIPTPATH/tools/SubDomainizer.py" -u "$target" -o "$SCRIPTPATH/SubDomainizer$domain.txt" 2>/dev/null | tee "$OUTFOLDER/SubDomainizer-$domain.txt" || true
+		timeout 90 python3 "$SCRIPTPATH/tools/SubDomainizer.py" -u "$target" -o "$SCRIPTPATH/SubDomainizer$domain.txt" 2>/dev/null | tee "$OUTFOLDER/SubDomainizer-$domain.txt" || true
 		[ -f "$SCRIPTPATH/SubDomainizer$domain.txt" ] && cat "$SCRIPTPATH/SubDomainizer$domain.txt" >> "$output_folder/subdomains.txt.new"
 		[ -f "$SCRIPTPATH/SubDomainizer$domain.txt" ] && rm "$SCRIPTPATH/SubDomainizer$domain.txt"
 
 		echo -e "\n${CYAN}>>>${PURPLE} Running sublist3r 🔍${RESET}"
-		sublist3r -d "$target" -o "$SCRIPTPATH/sublist3r-$domain.txt" 2>/dev/null
+		timeout 180 sublist3r -d "$target" -o "$SCRIPTPATH/sublist3r-$domain.txt" 2>/dev/null
 		[ -f "$SCRIPTPATH/sublist3r-$domain.txt" ] && cat "$SCRIPTPATH/sublist3r-$domain.txt" >> "$output_folder/subdomains.txt.new"
 		[ -f "$SCRIPTPATH/sublist3r-$domain.txt" ] && rm "$SCRIPTPATH/sublist3r-$domain.txt"
 
 		echo -e "\n${CYAN}>>>${PURPLE} Running knockpy 🔍${RESET}"
-		knockpy -d "$target" -w "$wordlist" -o "$output_folder/knockpy/" -t 5 2>/dev/null || true
+		timeout 300 knockpy -d "$target" -w "$wordlist" -o "$output_folder/knockpy/" -t 5 2>/dev/null || true
 
 		# GitHub subdomain search (requires API key)
 		if [ "$GHAPIKEY" != "False" ]; then
@@ -573,19 +574,20 @@ subdomainEnumeration() {
 		echo -e "${YELLOW}[!] All subdomains will be saved in ${PINK}$output_folder/subdomains.txt${RESET}"
 
 		echo -n -e "${CYAN}>>> assetfinder${RESET}"
-		assetfinder "$target" 2>/dev/null >> "$output_folder/subdomains.txt.new" || \
-		$GOPATH/bin/assetfinder "$target" 2>/dev/null >> "$output_folder/subdomains.txt.new"
+		timeout 120 assetfinder "$target" 2>/dev/null >> "$output_folder/subdomains.txt.new" || \
+		timeout 120 $GOPATH/bin/assetfinder "$target" 2>/dev/null >> "$output_folder/subdomains.txt.new"
 		echo -e " ${GREEN}✅${RESET}"
 
 		echo -n -e "${CYAN}>>> subfinder${RESET}"
-		subfinder --silent -d "$target" 2>/dev/null >> "$output_folder/subdomains.txt.new" || \
-		$GOPATH/bin/subfinder --silent -d "$target" 2>/dev/null >> "$output_folder/subdomains.txt.new"
+		timeout 180 subfinder --silent -d "$target" 2>/dev/null >> "$output_folder/subdomains.txt.new" || \
+		timeout 180 $GOPATH/bin/subfinder --silent -d "$target" 2>/dev/null >> "$output_folder/subdomains.txt.new"
 		echo -e " ${GREEN}✅${RESET}"
 
 		echo -n -e "${CYAN}>>> amass${RESET}"
 		export GO111MODULE=auto
-		amass enum --passive -d "$target" 2>/dev/null >> "$output_folder/subdomains.txt.new" || \
-		$GOPATH/bin/amass enum --passive -d "$target" 2>/dev/null >> "$output_folder/subdomains.txt.new"
+		# FIX: < /dev/null prevents interactive prompts (API key, config wizard)
+		timeout 300 amass enum --passive -silent -d "$target" < /dev/null 2>/dev/null >> "$output_folder/subdomains.txt.new" || \
+		timeout 300 $GOPATH/bin/amass enum --passive -silent -d "$target" < /dev/null 2>/dev/null >> "$output_folder/subdomains.txt.new"
 		echo -e " ${GREEN}✅${RESET}"
 
 		echo -n -e "${CYAN}>>> RapidDNS.io${RESET}"
@@ -611,26 +613,26 @@ subdomainEnumeration() {
 		echo -e " ${GREEN}✅${RESET}"
 
 		echo -n -e "${CYAN}>>> findomain${RESET}"
-		findomain -t "$target" -q -u "$SCRIPTPATH/findomain-$target.txt" 2>/dev/null || \
-		$GOPATH/bin/findomain -t "$target" -q -u "$SCRIPTPATH/findomain-$target.txt" 2>/dev/null
+		timeout 120 findomain -t "$target" -q -u "$SCRIPTPATH/findomain-$target.txt" 2>/dev/null || \
+		timeout 120 $GOPATH/bin/findomain -t "$target" -q -u "$SCRIPTPATH/findomain-$target.txt" 2>/dev/null
 		[ -f "$SCRIPTPATH/findomain-$target.txt" ] && cat "$SCRIPTPATH/findomain-$target.txt" >> "$output_folder/subdomains.txt.new"
 		[ -f "$SCRIPTPATH/findomain-$target.txt" ] && rm "$SCRIPTPATH/findomain-$target.txt"
 		echo -e " ${GREEN}✅${RESET}"
 
 		echo -n -e "${CYAN}>>> SubDomainizer${RESET}"
-		python3 "$SCRIPTPATH/tools/SubDomainizer.py" -u "$target" -o "$SCRIPTPATH/SubDomainizer$domain.txt" 2>/dev/null >/dev/null || true
+		timeout 90 python3 "$SCRIPTPATH/tools/SubDomainizer.py" -u "$target" -o "$SCRIPTPATH/SubDomainizer$domain.txt" 2>/dev/null >/dev/null || true
 		[ -f "$SCRIPTPATH/SubDomainizer$domain.txt" ] && cat "$SCRIPTPATH/SubDomainizer$domain.txt" >> "$output_folder/subdomains.txt.new"
 		[ -f "$SCRIPTPATH/SubDomainizer$domain.txt" ] && rm "$SCRIPTPATH/SubDomainizer$domain.txt"
 		echo -e " ${GREEN}✅${RESET}"
 
 		echo -n -e "${CYAN}>>> sublist3r${RESET}"
-		sublist3r -d "$target" -o "$SCRIPTPATH/sublist3r-$domain.txt" 2>/dev/null >/dev/null
+		timeout 180 sublist3r -d "$target" -o "$SCRIPTPATH/sublist3r-$domain.txt" 2>/dev/null >/dev/null
 		[ -f "$SCRIPTPATH/sublist3r-$domain.txt" ] && cat "$SCRIPTPATH/sublist3r-$domain.txt" >> "$output_folder/subdomains.txt.new"
 		[ -f "$SCRIPTPATH/sublist3r-$domain.txt" ] && rm "$SCRIPTPATH/sublist3r-$domain.txt"
 		echo -e " ${GREEN}✅${RESET}"
 
 		echo -n -e "${CYAN}>>> knockpy${RESET}"
-		knockpy -d "$target" -w "$wordlist" -o "$output_folder/knockpy/" -t 5 2>/dev/null >/dev/null || true
+		timeout 300 knockpy -d "$target" -w "$wordlist" -o "$output_folder/knockpy/" -t 5 2>/dev/null >/dev/null || true
 		echo -e " ${GREEN}✅${RESET}"
 
 		if [ "$GHAPIKEY" != "False" ]; then
@@ -1017,14 +1019,15 @@ wafDetect() {
 			echo -e "${CYAN}[SKIP] Nenhum domínio novo para detectar WAF${RESET}"
 			# Still regenerate the lists from existing waf.txt
 		else
-			echo -e "${CYAN}[INCREMENTAL] Detectando WAF em ${PINK}$new_count${CYAN} novos domínios${RESET}"
+			echo -e "${CYAN}[INCREMENTAL] Detectando WAF em ${PINK}$new_count${CYAN} novos domínios (timeout: 5min)${RESET}"
 
 			# BUGFIX: wafw00f -o saves CSV format, but we need the readable stdout
 			# Capture stdout (readable format with "is behind") AND show to user
+			# TIMEOUT: 300s (5 min) to prevent hanging on large domain lists
 			if [ "$QUIET" == "True" ]; then
-				wafw00f -i "$new_domains_file" -a 2>/dev/null >> "$output_folder/.waf.txt.new"
+				timeout 300 wafw00f -i "$new_domains_file" -a 2>/dev/null >> "$output_folder/.waf.txt.new"
 			else
-				wafw00f -i "$new_domains_file" -a 2>/dev/null | tee -a "$output_folder/.waf.txt.new"
+				timeout 300 wafw00f -i "$new_domains_file" -a 2>/dev/null | tee -a "$output_folder/.waf.txt.new"
 			fi
 
 			# Merge results
@@ -1043,10 +1046,11 @@ wafDetect() {
 		echo -e "${CYAN}[FULL-SCAN] Detectando WAF em todos os domínios ativos${RESET}"
 
 		# BUGFIX: Capture stdout (readable format) instead of using -o flag
+		# TIMEOUT: 300s (5 min) to prevent hanging on large domain lists
 		if [ "$QUIET" == "True" ]; then
-			wafw00f -i "$alive_file" -a 2>/dev/null > "$waf_file"
+			timeout 300 wafw00f -i "$alive_file" -a 2>/dev/null > "$waf_file"
 		else
-			wafw00f -i "$alive_file" -a 2>/dev/null | tee "$waf_file"
+			timeout 300 wafw00f -i "$alive_file" -a 2>/dev/null | tee "$waf_file"
 		fi
 
 		# Create checked list
@@ -1371,7 +1375,7 @@ linkDiscovery() {
 			echo "$url" >> "$temp_all"
 			echo -e "${GREEN}[KATANA] $url${RESET}"
 			((katana_count++))
-		done < <(cat "$alive_domains" | katana -d 2 -jc -kf -nc 2>/dev/null | grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)")
+		done < <(cat "$alive_domains" | timeout 180 katana -d 2 -jc -kf -nc 2>/dev/null | grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)")
 		echo -e "${CYAN}[*] Katana encontrou: ${PINK}$katana_count${CYAN} URLs${RESET}"
 	else
 		echo -e "${YELLOW}[!] katana não instalado, pulando...${RESET}"
@@ -1380,7 +1384,7 @@ linkDiscovery() {
 	# 2. WAYBACKURLS - Historical URLs (batch mode = faster)
 	echo -e "${ORANGE}>>> [2/4] Waybackurls (historical)...${RESET}"
 	cat "$alive_domains" | sed 's|https\?://||g' | cut -d'/' -f1 | sort -u | \
-	waybackurls 2>/dev/null | \
+	timeout 180 waybackurls 2>/dev/null | \
 	grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)" | \
 	tee -a "$temp_all" | \
 	while read -r url; do
@@ -1391,7 +1395,7 @@ linkDiscovery() {
 	echo -e "${ORANGE}>>> [3/4] GAU (multiple sources)...${RESET}"
 	if command -v gau &>/dev/null; then
 		cat "$alive_domains" | sed 's|https\?://||g' | cut -d'/' -f1 | sort -u | \
-		gau --threads 5 --subs 2>/dev/null | \
+		timeout 180 gau --threads 5 --subs 2>/dev/null | \
 		grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)" | \
 		tee -a "$temp_all" | \
 		while read -r url; do
@@ -1403,7 +1407,7 @@ linkDiscovery() {
 
 	# 4. HAKRAWLER - Fallback crawling (fast mode)
 	echo -e "${ORANGE}>>> [4/4] Hakrawler (crawling)...${RESET}"
-	cat "$alive_domains" | hakrawler -t 20 -timeout 10 2>/dev/null | \
+	cat "$alive_domains" | timeout 120 hakrawler -t 20 -timeout 10 2>/dev/null | \
 	grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)" | \
 	tee -a "$temp_all" | \
 	while read -r url; do
@@ -1503,16 +1507,25 @@ endpointsEnumeration() {
 	# ═══════════════════════════════════════════════════════════════════
 	echo -e "${CYAN}[*] Descobrindo arquivos JS...${RESET}"
 
-	# Gospider for JS discovery
-	cat "$alive_domains" | while read -r target_url; do
-		gospider -a -s "$target_url" -d 2 --no-redirect 2>/dev/null | \
-		grep -Eo "(http|https)://[^/\"']*\.js" | \
-		grep -E "$domain_escaped"
-	done >> "$output_folder/js/js.txt" 2>/dev/null || true
+	# Gospider for JS discovery (with timeout and progress)
+	local total_domains=$(wc -l < "$alive_domains" 2>/dev/null || echo "0")
+	local current_domain=0
 
-	# Waybackurls for historical JS
+	cat "$alive_domains" | while read -r target_url; do
+		[ -z "$target_url" ] && continue
+		((current_domain++))
+		echo -ne "\r${CYAN}  [Gospider] Processing domain ${current_domain}/${total_domains}...${RESET}"
+
+		timeout 45 gospider -a -s "$target_url" -d 2 --no-redirect 2>/dev/null | \
+		grep -Eo "(http|https)://[^/\"']*\.js" | \
+		grep -E "$domain_escaped" >> "$output_folder/js/js.txt" 2>/dev/null || true
+	done
+	echo -e "\r${CYAN}  [Gospider] Completed ${total_domains} domains${RESET}                    "
+
+	# Waybackurls for historical JS (with timeout)
+	echo -e "${CYAN}  [Waybackurls] Fetching historical JS files...${RESET}"
 	cat "$alive_domains" | sed 's|https\?://||g' | cut -d'/' -f1 | sort -u | \
-	waybackurls 2>/dev/null | \
+	timeout 120 waybackurls 2>/dev/null | \
 	grep -iE '\.js$' | grep -ivE '(\.jsp|\.json)' | \
 	grep -E "$domain_escaped" >> "$output_folder/js/js.txt" 2>/dev/null || true
 
@@ -1521,7 +1534,8 @@ endpointsEnumeration() {
 
 	# Check which JS files are alive (fast check with httpx)
 	if [ -f "$output_folder/js/js.txt" ] && [ -s "$output_folder/js/js.txt" ]; then
-		cat "$output_folder/js/js.txt" | httpx -silent -mc 200 -ct | \
+		echo -e "${CYAN}  [httpx] Verificando JS files ativos...${RESET}"
+		timeout 90 cat "$output_folder/js/js.txt" | httpx -silent -mc 200 -ct -timeout 10 | \
 		grep -i "javascript\|text" | awk '{print $1}' | \
 		sort -u > "$output_folder/js/AliveJS.txt" 2>/dev/null || \
 		cat "$output_folder/js/js.txt" > "$output_folder/js/AliveJS.txt"
@@ -1666,10 +1680,21 @@ endpointsEnumeration() {
 	echo -e ""
 	echo -e "${CYAN}[*] Running ParamSpider for parameter discovery...${RESET}"
 
+	local param_domain_count=0
+	local param_total_domains=$(wc -l < "$alive_domains" 2>/dev/null || echo "0")
+
 	while read -r d; do
-		python3 "$SCRIPTPATH/tools/ParamSpider/paramspider.py" -d "$d" -s 2>/dev/null | \
+		[ -z "$d" ] && continue
+		((param_domain_count++))
+
+		local domain_name=$(echo "$d" | sed 's|https\?://||' | cut -d'/' -f1 | cut -c1-40)
+		echo -ne "\r${CYAN}  [ParamSpider] ${param_domain_count}/${param_total_domains} - ${domain_name}...${RESET}"
+
+		timeout 60 python3 "$SCRIPTPATH/tools/ParamSpider/paramspider.py" -d "$d" -s 2>/dev/null | \
 		grep -E "https?://([^/]*\.)?${domain_escaped}(/|:|$)" >> "$output_folder/all.txt" 2>/dev/null || true
 	done < "$alive_domains"
+
+	echo -e "\r${CYAN}  [ParamSpider] Completed ${param_total_domains} domains${RESET}                              "
 
 	# Final deduplication
 	sort -u "$output_folder/all.txt" -o "$output_folder/all.txt" 2>/dev/null
@@ -1893,7 +1918,7 @@ findVuln() {
 		if command -v gf &>/dev/null; then
 			echo -e "${CYAN}>>> Running gf patterns...${RESET}"
 			cat "$list" 2>/dev/null | gf lfi >> "$output_folder/lfi.txt" 2>/dev/null || true
-			cat "$DOMAINS" 2>/dev/null | waybackurls 2>/dev/null | gf sqli >> "$output_folder/possible-sqli.txt" 2>/dev/null || true
+			cat "$DOMAINS" 2>/dev/null | timeout 120 waybackurls 2>/dev/null | gf sqli >> "$output_folder/possible-sqli.txt" 2>/dev/null || true
 		fi
 	fi
 	
