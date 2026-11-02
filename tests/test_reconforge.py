@@ -423,6 +423,25 @@ class TestScanTargetingFixes(unittest.TestCase):
         report = check_system_tools()
         print_tools_table(report)
 
+    def test_rich_ui_helpers_render_cleanly(self):
+        from reconforge import print_phase, print_scan_plan, print_findings_details
+        print_phase("Fase 1", "Descoberta Passiva")
+        sample_plan = [
+            {
+                "url": "https://api.example.com/v1/items?id=1",
+                "classes": ["sqli", "xss"],
+                "params": ["id"],
+                "suggested_tools": ["sqlmap", "dalfox"],
+            }
+        ]
+        print_scan_plan(sample_plan)
+        print_findings_details(
+            takeovers=[{"host": "old.example.com", "service": "GitHub Pages", "cname": "x.github.io"}],
+            bypasses=[{"url": "https://example.com/admin", "technique": "header:X-Original-URL", "status": 200}],
+            bolas=[{"url": "https://api.example.com/v1/user/1", "verdict": "likely_bola", "status_a": 200, "status_b": 200}],
+            top_urls=[(95, 200, "api,admin", "katana", "https://api.example.com/admin/v1/users")],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

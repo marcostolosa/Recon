@@ -37,10 +37,18 @@ import xml.etree.ElementTree as ET
 import httpx
 
 try:
+    for _s in (sys.stdout, sys.stderr):
+        if hasattr(_s, "reconfigure"):
+            try:
+                _s.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
     from rich import box as _rich_box
-    from rich.console import Console
+    from rich.console import Console, Group
     from rich.logging import RichHandler
     from rich.panel import Panel
+    from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+    from rich.rule import Rule
     from rich.table import Table
     from rich.text import Text
     _RICH = True
@@ -59,9 +67,23 @@ C_OK = "bright_green"
 C_WARN = "yellow"
 C_HOT = "bright_magenta"
 
+ASCII_LOGO = r"""
+  ____                      _____                    
+ |  _ \ ___  ___ ___  _ __ |  ___|__  _ __ __ _  ___ 
+ | |_) / _ \/ __/ _ \| '_ \| |_ / _ \| '__/ _` |/ _ \
+ |  _ <  __/ (_| (_) | | | |  _| (_) | | | (_| |  __/
+ |_| \_\___|\___\___/|_| |_|_|  \___/|_|  \__, |\___|
+                                          |___/      """
+
 
 def setup_logging(level: int = logging.INFO) -> None:
     """Rich-colored logs on a TTY; plain, greppable text otherwise (files/pipes)."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
     if _RICH:
         handler = RichHandler(
             console=CONSOLE,
@@ -93,24 +115,104 @@ def _active_features(a) -> list[str]:
     return feats
 
 
+def print_phase(step: str, title: str) -> None:
+    """Render a visual phase divider on a Rich terminal."""
+    if _RICH and CONSOLE.is_terminal:
+        CONSOLE.print(Rule(f"[bold {C_ACCENT}]{step}[/bold {C_ACCENT}] [dim]•[/dim] [bold]{title}[/bold]", style=C_ACCENT))
+
+
 def print_banner(a) -> None:
     if not _RICH:
         LOG.info("ReconForge v%s | target=%s | scope=%s | profile=%s",
                  VERSION, a.domain, "subdomains" if a.subdomains else "apex", a.scan_profile)
         return
+    logo = Text(ASCII_LOGO.strip("\n"), style="bold " + C_ACCENT)
     grid = Table.grid(padding=(0, 2))
     grid.add_column(style="bold " + C_ACCENT, justify="right")
     grid.add_column()
-    grid.add_row("target", f"[bold]{a.domain}[/bold]")
-    grid.add_row("scope", "apex + subdomains" if a.subdomains else "apex only")
-    grid.add_row("profile", f"{a.scan_profile}  ·  rate {a.rate}/s  ·  conc {a.concurrency}")
+    grid.add_row("target", f"[bold white]{a.domain}[/bold white]")
+    grid.add_row("scope", f"[{C_OK}]apex + subdomains[/{C_OK}]" if a.subdomains else "apex only")
+    grid.add_row("profile", f"[bold]{a.scan_profile}[/bold]  [dim]•[/dim]  rate {a.rate}/s  [dim]•[/dim]  conc {a.concurrency}")
     grid.add_row("budget", f"{a.max_probes} probes / {a.max_requests} requests")
+    grid.add_row("output", f"[dim]{getattr(a, 'out', 'reconforge-output')}[/dim]")
     feats = _active_features(a)
     if feats:
-        grid.add_row("modules", "  ".join(feats))
-    title = Text.assemble(("ReconForge ", "bold " + C_ACCENT), (f"v{VERSION}", "dim"))
-    CONSOLE.print(Panel(grid, title=title, subtitle="[dim]authorized recon only[/dim]",
-                        border_style=C_ACCENT, box=_rich_box.ROUNDED, padding=(1, 2)))
+        badges = " ".join(f"[bold {C_HOT} on default][{f}][/bold {C_HOT} on default]" for f in feats)
+        grid.add_row("modules", badges)
+    title = Text.assemble(("ReconForge ", "bold " + C_ACCENT), (f"v{VERSION} ", "bold " + C_HOT), ("— Bug Bounty Pipeline", "dim"))
+    body = Group(logo, Text(""), grid)
+    CONSOLE.print(Panel(body, title=title, subtitle="[dim]authorized scope only • GET-safe • DNS-pinned[/dim]",
+                        border_style=C_ACCENT, box=_rich_box.ROUNDED, padding=(1, 3)))
+
+
+def print_scan_plan(plan: list[dict]) -> None:
+    """Render routed scan plan table on a Rich terminal."""
+    if not _RICH or not plan:
+        return
+    tab = Table(
+        title=f"[bold {C_ACCENT}]Intelligent Scan Planner ({len(plan)} Routed Endpoints)[/bold {C_ACCENT}]",
+        box=_rich_box.ROUNDED,
+        border_style=C_ACCENT,
+        show_lines=False,
+    )
+    tab.add_column("#", style="dim", justify="right")
+    tab.add_column("Endpoint URL", style="bold white", overflow="fold")
+    tab.add_column("Classes", style=C_HOT)
+    tab.add_column("Params", style=C_WARN)
+    tab.add_column("Suggested Tools", style=C_OK)
+    for idx, item in enumerate(plan[:25], 1):
+        tab.add_row(
+            str(idx),
+            item["url"],
+            ", ".join(item["classes"]),
+            ", ".join(item["params"]),
+            ", ".join(item["suggested_tools"]),
+        )
+    if len(plan) > 25:
+        tab.add_row("...", f"[dim]+{len(plan) - 25} more in scan_plan.json[/dim]", "", "", "")
+    CONSOLE.print(tab)
+
+
+def print_findings_details(takeovers: list[dict], bypasses: list[dict], bolas: list[dict], top_urls: list[tuple] | None = None) -> None:
+    """Render detailed tables for any discovered security candidates and top priority URLs."""
+    if not _RICH:
+        return
+    if takeovers or bypasses or bolas:
+        ftab = Table(
+            title=f"[bold {C_HOT}]Security Candidates (Manual Verification Required)[/bold {C_HOT}]",
+            box=_rich_box.ROUNDED,
+            border_style=C_HOT,
+        )
+        ftab.add_column("Module", style="bold " + C_HOT)
+        ftab.add_column("Target / Host", style="bold white", overflow="fold")
+        ftab.add_column("Signal / Technique", style=C_WARN)
+        ftab.add_column("Details", style="dim")
+        for t in takeovers[:15]:
+            ftab.add_row("TAKEOVER", str(t.get("host", "")), str(t.get("service") or t.get("signal", "")), f"cname={t.get('cname') or '-'}")
+        for b in bypasses[:15]:
+            ftab.add_row("403-BYPASS", str(b.get("url", "")), str(b.get("technique", "")), f"status={b.get('status')} bytes={b.get('bytes')}")
+        for bo in bolas[:15]:
+            ftab.add_row("BOLA/IDOR", str(bo.get("url", "")), str(bo.get("type", "")), str(bo.get("detail", "")))
+        CONSOLE.print(ftab)
+    if top_urls:
+        utab = Table(
+            title=f"[bold {C_ACCENT}]Top Priority Alive Endpoints[/bold {C_ACCENT}]",
+            box=_rich_box.SIMPLE_HEAD,
+            border_style=C_ACCENT,
+        )
+        utab.add_column("Score", justify="right", style="bold " + C_OK)
+        utab.add_column("Status", justify="right")
+        utab.add_column("Tags", style=C_WARN)
+        utab.add_column("Source", style="dim")
+        utab.add_column("URL", overflow="fold", style="white")
+        for row in top_urls[:12]:
+            if len(row) == 5:
+                pri, status, tags, src, url = row
+            else:
+                pri, url, tags, status = row[:4]
+                src = "-"
+            utab.add_row(str(pri), str(status), tags or "-", str(src or "-"), url)
+        CONSOLE.print(utab)
 
 
 def print_summary(summary: dict, out_dir: Path) -> None:
@@ -1352,8 +1454,24 @@ class Recon:
 
         # Controlled batch execution to prevent socket saturation
         chunk_size = max(1, self.a.dns_concurrency)
-        for i in range(0, len(hosts), chunk_size):
-            await asyncio.gather(*(one(h) for h in hosts[i : i + chunk_size]))
+        if _RICH and CONSOLE.is_terminal and hosts:
+            with Progress(
+                SpinnerColumn(style="cyan"),
+                TextColumn("[bold cyan]{task.description}"),
+                BarColumn(bar_width=32, style="dim", complete_style="cyan", finished_style="green"),
+                MofNCompleteColumn(),
+                TimeElapsedColumn(),
+                console=CONSOLE,
+                transient=True,
+            ) as progress:
+                task = progress.add_task("Resolvendo DNS & semeando hosts...", total=len(hosts))
+                for i in range(0, len(hosts), chunk_size):
+                    batch = hosts[i : i + chunk_size]
+                    await asyncio.gather(*(one(h) for h in batch))
+                    progress.advance(task, len(batch))
+        else:
+            for i in range(0, len(hosts), chunk_size):
+                await asyncio.gather(*(one(h) for h in hosts[i : i + chunk_size]))
         self.store.commit()
 
     def analyze_js(self, url: str, body: str):
@@ -1501,15 +1619,48 @@ class Recon:
 
     async def drain(self, max_probes: int, source: str | None = None):
         LOG.info("HTTP iterative queue, max probes %d", max_probes)
-        while self.probed < max_probes and self.gate.count < self.a.max_requests:
-            batch_limit = min(self.a.concurrency * 4, max_probes - self.probed)
-            items = self.store.pending(batch_limit, source)
-            if not items:
-                break
-            await asyncio.gather(*(self.probe(u) for u in items))
-            self.store.commit()
-            if self.probed % 100 < len(items):
-                LOG.info("probed=%d requests=%d urls=%d", self.probed, self.gate.count, self.store.url_count)
+        if _RICH and CONSOLE.is_terminal:
+            label = f"HTTP Probing ({source})" if source else "HTTP Probing & Crawling"
+            with Progress(
+                SpinnerColumn(style="cyan"),
+                TextColumn("[bold cyan]{task.description}"),
+                BarColumn(bar_width=32, style="dim", complete_style="cyan", finished_style="green"),
+                MofNCompleteColumn(),
+                TextColumn("[dim]urls={task.fields[urls]} reqs={task.fields[reqs]}[/]"),
+                TimeElapsedColumn(),
+                console=CONSOLE,
+                transient=True,
+            ) as progress:
+                task = progress.add_task(
+                    label,
+                    total=max_probes,
+                    completed=min(self.probed, max_probes),
+                    urls=self.store.url_count,
+                    reqs=self.gate.count,
+                )
+                while self.probed < max_probes and self.gate.count < self.a.max_requests:
+                    batch_limit = min(self.a.concurrency * 4, max_probes - self.probed)
+                    items = self.store.pending(batch_limit, source)
+                    if not items:
+                        break
+                    await asyncio.gather(*(self.probe(u) for u in items))
+                    self.store.commit()
+                    progress.update(
+                        task,
+                        completed=min(self.probed, max_probes),
+                        urls=self.store.url_count,
+                        reqs=self.gate.count,
+                    )
+        else:
+            while self.probed < max_probes and self.gate.count < self.a.max_requests:
+                batch_limit = min(self.a.concurrency * 4, max_probes - self.probed)
+                items = self.store.pending(batch_limit, source)
+                if not items:
+                    break
+                await asyncio.gather(*(self.probe(u) for u in items))
+                self.store.commit()
+                if self.probed % 100 < len(items):
+                    LOG.info("probed=%d requests=%d urls=%d", self.probed, self.gate.count, self.store.url_count)
 
     async def crawl_katana(self):
         if not self.a.katana:
@@ -2079,6 +2230,12 @@ class Recon:
         }
         atomic_text(self.out / "summary.json", json.dumps(summary, indent=2, ensure_ascii=False))
         if _RICH and CONSOLE.is_terminal:
+            top_urls = self.store.conn.execute(
+                "SELECT priority, status, tags, source, url FROM urls "
+                "WHERE status BETWEEN 200 AND 399 AND source != 'soft404_control' "
+                "ORDER BY priority DESC, url LIMIT 15"
+            ).fetchall()
+            print_findings_details(self.takeover_hits, self.bypass_hits, self.bola_findings, top_urls)
             print_summary(summary, self.out)
         else:
             LOG.info("summary: %s", json.dumps(summary, ensure_ascii=False))
@@ -2233,6 +2390,8 @@ class Recon:
         self._write_scan_script(plan, tool_targets, scan_dir)
         suggested = sorted({t for p in plan for t in p["suggested_tools"]})
         LOG.info("scan planner: %d endpoints, tools suggested: %s", len(plan), ", ".join(suggested))
+        if _RICH and CONSOLE.is_terminal and plan:
+            print_scan_plan(plan)
         if self.a.auto_scan:
             await self._run_plan(tool_targets, scan_dir)
         else:
@@ -2326,11 +2485,14 @@ class Recon:
         if not existing.exists():
             atomic_text(existing, json.dumps(self.scope_config(), indent=2))
         try:
+            print_phase("Fase 1", "Descoberta Passiva & DNS Enumeration")
             await self.passive()
             if self.a.passive_only:
                 return
+            print_phase("Fase 2", "Resolução DNS, Pinning & Probing Inicial")
             await self.seed_hosts()
             await self.drain(min(self.a.max_probes, self.a.initial_probes))
+            print_phase("Fase 3", "Crawling Profundo, Extração JS & Renderização")
             await self.crawl_katana()
             discovery_cap = (
                 self.a.max_probes
@@ -2340,16 +2502,21 @@ class Recon:
             await self.drain(discovery_cap)
             await self.browser()
             await self.drain(discovery_cap)
+            if self.a.fuzz or self.a.ffuf:
+                print_phase("Fase 4", "Fuzzing Contextual & Calibração Soft-404")
             await self.wordlist_fuzz()
             await self.ffuf()
             await self.drain(self.a.max_probes)
+            print_phase("Fase 5", "Verificações de Segurança (Takeover, 403 Bypass, BOLA, Secrets)")
             await self.takeover()
             await self.bypass_403()
             await self.bola()
             await self.offline_secrets()
+            print_phase("Fase 6", "Scan Planner & Scanners Direcionados")
             await self.scanners()
             await self.plan_scans()
         finally:
+            print_phase("Fase 7", "Exportação de Artefatos & Relatório Final")
             self.export()
 
 
