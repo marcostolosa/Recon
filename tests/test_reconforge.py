@@ -14,6 +14,7 @@ from reconforge import (
     Store,
     Throttle,
     build_parser,
+    apply_full_preset,
     check_system_tools,
     hostnorm,
     injection_classes,
@@ -466,20 +467,7 @@ class TestScanTargetingFixes(unittest.TestCase):
         from reconforge import _active_features
         p = build_parser()
         a = p.parse_args(["example.com", "--full"])
-        # Trigger preset expansion logic
-        if getattr(a, "full", False):
-            a.subdomains = True
-            a.katana = True
-            a.jsluice = True
-            a.gitleaks = True
-            a.trufflehog = True
-            a.fuzz = True
-            a.ffuf = True
-            a.takeover = True
-            a.bypass_403 = True
-            a.scan_profile = "deep"
-            if a.out == "reconforge-output":
-                a.out = str(Path("runs") / a.domain)
+        apply_full_preset(a, ["example.com", "--full"])
         self.assertTrue(a.subdomains)
         self.assertTrue(a.katana)
         self.assertTrue(a.jsluice)
@@ -493,6 +481,18 @@ class TestScanTargetingFixes(unittest.TestCase):
         self.assertEqual(a.out, str(Path("runs") / "example.com"))
         feats = _active_features(a)
         self.assertIn("FULL-PRESET", feats)
+
+    def test_full_preserves_explicit_limits_profile_and_exact_host(self):
+        argv = ["example.com", "--full", "--no-subdomains", "--no-takeover", "--scan-profile=safe",
+                "--max-probes", "4000", "--max-requests=6000", "--out", "reconforge-output"]
+        a = build_parser().parse_args(argv)
+        apply_full_preset(a, argv)
+        self.assertFalse(a.subdomains)
+        self.assertFalse(a.takeover)
+        self.assertEqual(a.scan_profile, "safe")
+        self.assertEqual(a.max_probes, 4000)
+        self.assertEqual(a.max_requests, 6000)
+        self.assertEqual(a.out, "reconforge-output")
 
 
 if __name__ == "__main__":

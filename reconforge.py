@@ -46,6 +46,7 @@ try:
     from rich import box as _rich_box
     from rich.console import Console, Group
     from rich.logging import RichHandler
+    from rich.markup import escape as _rich_escape
     from rich.panel import Panel
     from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
     from rich.rule import Rule
@@ -145,7 +146,7 @@ def print_banner(a) -> None:
     grid.add_row("output", f"[dim]{getattr(a, 'out', 'reconforge-output')}[/dim]")
     feats = _active_features(a)
     if feats:
-        badges = " ".join(f"[bold {C_HOT} on default][{f}][/bold {C_HOT} on default]" for f in feats)
+        badges = " ".join(f"[bold {C_HOT} on default]{_rich_escape('[' + f + ']')}[/bold {C_HOT} on default]" for f in feats)
         grid.add_row("modules", badges)
     title = Text.assemble(("ReconForge ", "bold " + C_ACCENT), (f"v{VERSION} ", "bold " + C_HOT), ("— Bug Bounty Pipeline", "dim"))
     body = Group(logo, Text(""), grid)
@@ -2212,10 +2213,11 @@ class Recon:
         if not words:
             return
         wordfile = self.tool_dir / "ffuf_words.txt"
-        wordfile.write_text("\n".join(dict.fromkeys(words[: self.a.max_fuzz_words])) + "\n", encoding="utf8")
-        for i, origin in enumerate(dict.fromkeys(origins)):
-            if i >= self.a.max_ffuf_hosts:
-                break
+        target_hosts = list(dict.fromkeys(origins))[: self.a.max_ffuf_hosts]
+        if target_hosts:
+            ui_event("FUZZ", f"ffuf -> fuzzing de diretórios em [bold]{len(target_hosts)}[/bold] host(s)...", C_ACCENT)
+        total_ffuf_hits = 0
+        for i, origin in enumerate(target_hosts):
             output = self.tool_dir / f"ffuf_{i}.json"
             safe_words = [w for w in words[: self.a.max_fuzz_words]
                           if self.permitted_url(urljoin(origin, w))]
@@ -2251,8 +2253,11 @@ class Recon:
                     for row in data.get("results", []):
                         if isinstance(row.get("url"), str):
                             self.put_url(row["url"], "ffuf")
+                            total_ffuf_hits += 1
                 except (ValueError, OSError):
                     LOG.warning("invalid ffuf JSON: %s", output)
+        if target_hosts:
+            ui_event("FUZZ", f"ffuf concluído -> [bold]{total_ffuf_hits}[/bold] novas rotas descobertas", C_OK if total_ffuf_hits else C_WARN)
         self.store.commit()
 
     async def browser(self):
@@ -2871,7 +2876,8 @@ class Recon:
             # many variants of one endpoint (id=0, id=1, id=0+and+1=1--) into a single
             # clean target so the scanner runs once per (path, params), not per variant.
             target = sanitize_scan_url(url)
-            key = (urlsplit(target).path, tuple(sorted(names)))
+            parts = urlsplit(target)
+            key = (parts.scheme, parts.netloc, parts.path, tuple(sorted(names)))
             if key in seen:
                 continue
             seen.add(key)
@@ -2945,9 +2951,11 @@ class Recon:
                 await self.command(f"autoscan_{tool}_{i}", self._scan_argv(tool, url, scan_dir, i))
 
     async def offline_secrets(self):
-        if not any((self.a.gitleaks, self.a.trufflehog)) or not any(self.js_dir.glob("*.js")):
+        js_files = list(self.js_dir.glob("*.js"))
+        if not any((self.a.gitleaks, self.a.trufflehog)) or not js_files:
             return
         if self.a.gitleaks:
+            ui_event("SECRETS", f"Analisando [bold]{len(js_files)}[/bold] arquivos JS com gitleaks...", C_ACCENT)
             await self.command(
                 "gitleaks",
                 [
@@ -2961,11 +2969,43 @@ class Recon:
                     str(self.tool_dir / "gitleaks.json"),
                 ],
             )
+            gl_out = self.tool_dir / "gitleaks.json"
+            gl_hits = 0
+            if gl_out.exists() and gl_out.stat().st_size > 0:
+                try:
+                    data = json.loads(gl_out.read_text(encoding="utf8"))
+                    for row in data if isinstance(data, list) else []:
+                        gl_hits += 1
+                        kind = f"gitleaks:{row.get('RuleID', 'secret')}"
+                        self.store.secret(kind, row.get("Secret", ""), row.get("File", "js"), row.get("StartLine", 1))
+                except Exception:
+                    pass
+            if gl_hits:
+                ui_event("SECRETS", f"[bold red]gitleaks[/bold red] detectou [bold]{gl_hits}[/bold] segredo(s)!", "bright_red")
+            else:
+                ui_event("SECRETS", f"gitleaks -> [bold]{len(js_files)}[/bold] arquivos JS verificados (zero vazamentos)", C_OK)
         if self.a.trufflehog:
-            await self.command(
+            ui_event("SECRETS", f"Analisando [bold]{len(js_files)}[/bold] arquivos JS com trufflehog...", C_ACCENT)
+            path = await self.command(
                 "trufflehog",
                 ["trufflehog", "filesystem", str(self.js_dir), "--no-verification", "--json"],
             )
+            th_hits = 0
+            if path and path.exists():
+                for line in path.read_text(encoding="utf8", errors="replace").splitlines():
+                    if line.strip():
+                        try:
+                            obj = json.loads(line)
+                            th_hits += 1
+                            det = obj.get("DetectorName", "secret")
+                            raw = obj.get("Raw", "")
+                            self.store.secret(f"trufflehog:{det}", raw, "js", 1)
+                        except Exception:
+                            pass
+            if th_hits:
+                ui_event("SECRETS", f"[bold red]trufflehog[/bold red] detectou [bold]{th_hits}[/bold] segredo(s)!", "bright_red")
+            else:
+                ui_event("SECRETS", f"trufflehog -> verificação concluída (zero vazamentos)", C_OK)
 
     async def run(self):
         try:
@@ -3044,6 +3084,27 @@ class Recon:
                     ui_event("VISUAL-UI", f"Dashboard estático salvo em: [bold white]{self.out / 'dashboard.html'}[/bold white]", C_OK)
 
 
+def apply_full_preset(a, argv: list[str]) -> None:
+    """Expand defaults only: an explicit operator limit always wins."""
+    if not a.full:
+        return
+    explicit = {token.split("=", 1)[0] for token in argv if token.startswith("--")}
+    if "--no-subdomains" not in explicit:
+        a.subdomains = True
+    for name in ("subfinder_all", "katana", "jsluice", "gitleaks", "trufflehog", "fuzz", "ffuf", "bypass_403"):
+        setattr(a, name, True)
+    if "--no-takeover" not in explicit:
+        a.takeover = True
+    if "--scan-profile" not in explicit:
+        a.scan_profile = "deep"
+    if "--max-probes" not in explicit:
+        a.max_probes = 5000
+    if "--max-requests" not in explicit:
+        a.max_requests = 8000
+    if "--out" not in explicit:
+        a.out = str(Path("runs") / re.sub(r"[^\w.-]", "_", a.domain))
+
+
 def build_parser():
     p = argparse.ArgumentParser(description="Scoped and resumable reconnaissance with optional active scanners")
     p.add_argument("domain", nargs="?", help="authorized apex hostname, without scheme")
@@ -3054,6 +3115,8 @@ def build_parser():
     p.add_argument("--auto-install", action="store_true", default=None, help="automatically check and install missing tools needed for the active flags (default: enabled on CLI)")
     p.add_argument("--no-auto-install", dest="auto_install", action="store_false", help="do not auto-install missing tools")
     p.add_argument("--subdomains", action="store_true", help="include *.domain only when explicitly in scope")
+    p.add_argument("--no-subdomains", dest="subdomains", action="store_false",
+                   help="restrict even --full to the exact hostname")
     p.add_argument("--exclude", action="append", default=[], help="exclude hostname and all its descendants")
     p.add_argument("--exclude-path", action="append", default=[], help="do not actively fetch this URL path prefix")
     p.add_argument("-H", "--header", action="append", default=[], help="custom header in 'Header: Value' format (e.g. for Bug Bounty IDs)")
@@ -3157,25 +3220,7 @@ def main():
         a.domain = hostnorm(a.domain)
     except (ValueError, UnicodeError) as exc:
         raise SystemExit(f"Invalid domain: {exc}") from exc
-    if getattr(a, "full", False):
-        a.subdomains = True
-        a.subfinder_all = True
-        a.katana = True
-        a.jsluice = True
-        a.gitleaks = True
-        a.trufflehog = True
-        a.fuzz = True
-        a.ffuf = True
-        a.takeover = True
-        a.bypass_403 = True
-        a.scan_profile = "deep"
-        if a.max_probes == 4000:
-            a.max_probes = 5000
-        if a.max_requests == 6000:
-            a.max_requests = 8000
-        if a.out == "reconforge-output":
-            clean_name = re.sub(r"[^\w.-]", "_", a.domain)
-            a.out = str(Path("runs") / clean_name)
+    apply_full_preset(a, sys.argv[1:])
     if a.visual:
         a.headed = True
         a.browser = True

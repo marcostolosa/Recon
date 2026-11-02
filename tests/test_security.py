@@ -227,6 +227,13 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         await self.r.plan_scans()
         self.assertEqual(self.r.scan_plan_count, 1)
 
+    async def test_planner_preserves_distinct_origins(self):
+        self.seed('https://example.com/item?id=1')
+        self.seed('https://api.example.com/item?id=1')
+        self.seed('http://example.com/item?id=1')
+        await self.r.plan_scans()
+        self.assertEqual(self.r.scan_plan_count, 3)
+
     async def test_openapi_non_get_operations_remain_manual(self):
         payload = json.dumps({'paths': {'/submit': {'post': {}}, '/fetch': {'get': {}}}}).encode()
         self.r.extract('https://example.com/openapi.json', 'application/json', payload)
