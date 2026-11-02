@@ -30,7 +30,7 @@ import subprocess
 import sys
 import sysconfig
 import time
-from urllib.parse import parse_qsl, unquote, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlsplit, urlunsplit
 import xml.etree.ElementTree as ET
 
 import httpx
@@ -300,6 +300,31 @@ def injection_classes(names: list[str]) -> set[str]:
 
 def is_cache_buster(names: list[str]) -> bool:
     return bool(names) and all(n.lower() in CACHE_BUSTER_PARAMS for n in names)
+
+
+# gau/wayback return URLs whose VALUES already carry other researchers' payloads
+# (id=0+and+1=1--[True], tfSearch=<script>...). Feeding those to sqlmap/dalfox makes
+# them refuse ("tainted parameter values"), so we reset tainted values to a benign one.
+SUSPICIOUS_PARAM_VALUE = re.compile(
+    r"""['"<>()]|--|/\*|\|\||\b(?:union|select|waitfor|sleep|concat|information_schema|xp_cmdshell|onerror|alert)\b|\b(?:and|or)\s+\d+\s*=|%27|%22|%3c|%3e|\[(?:true|false)\]""",
+    re.I,
+)
+
+
+def looks_tainted(value: str) -> bool:
+    return bool(value) and bool(SUSPICIOUS_PARAM_VALUE.search(value))
+
+
+def sanitize_scan_url(url: str) -> str:
+    """Reset any param value that looks like an injected payload to a benign value
+    so the external scanner gets a clean baseline to fuzz from."""
+    p = urlsplit(url)
+    cleaned = []
+    for k, v in parse_qsl(p.query, keep_blank_values=True):
+        if looks_tainted(v):
+            v = "1" if (v[:1].isdigit()) else "test"
+        cleaned.append((k, v))
+    return urlunsplit((p.scheme, p.netloc, p.path, urlencode(cleaned), ""))
 
 # Scan depth profiles. Depth (coverage) is tuned here; speed is a separate axis
 # controlled by each tool; --concurrency also caps its configured worker count.
@@ -1996,6 +2021,7 @@ class Recon:
         allowed = set(self.a.scan_tools) if self.a.scan_tools else None
         plan: list[dict] = []
         tool_targets: dict[str, list[str]] = defaultdict(list)
+        seen: set[tuple] = set()
         for url in rows:
             if len(plan) >= self.a.scan_plan_limit:
                 break
@@ -2009,10 +2035,18 @@ class Recon:
                 tools = [t for t in tools if t in allowed or t.split("-")[0] in allowed]
             if not tools:
                 continue
-            plan.append({"url": url, "classes": sorted(hits), "params": names, "suggested_tools": tools})
+            # Strip other researchers' payloads from the values, then collapse the
+            # many variants of one endpoint (id=0, id=1, id=0+and+1=1--) into a single
+            # clean target so the scanner runs once per (path, params), not per variant.
+            target = sanitize_scan_url(url)
+            key = (urlsplit(target).path, tuple(sorted(names)))
+            if key in seen:
+                continue
+            seen.add(key)
+            plan.append({"url": target, "classes": sorted(hits), "params": names, "suggested_tools": tools})
             for t in tools:
                 if t in EXECUTABLE_SCAN_TOOLS:
-                    tool_targets[t].append(url)
+                    tool_targets[t].append(target)
         self.scan_plan_count = len(plan)
         scan_dir = self.out / "scanners"
         scan_dir.mkdir(exist_ok=True)

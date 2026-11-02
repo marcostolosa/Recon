@@ -342,6 +342,47 @@ class TestScanTargetingFixes(unittest.TestCase):
         a = build_parser().parse_args(["example.com"])
         self.assertEqual(a.dns_timeout, 3)
 
+    def test_sanitize_strips_foreign_payloads(self):
+        from reconforge import sanitize_scan_url, looks_tainted
+        self.assertTrue(looks_tainted("0+and+1=1--[True]"))
+        self.assertTrue(looks_tainted("<script>alert(1)</script>"))
+        self.assertFalse(looks_tainted("5"))
+        self.assertFalse(looks_tainted("hello"))
+        self.assertEqual(
+            sanitize_scan_url("http://t.vulnweb.com/showforum.asp?id=0+and+1=1--%5BTrue%5D"),
+            "http://t.vulnweb.com/showforum.asp?id=1",
+        )
+        self.assertEqual(
+            sanitize_scan_url("http://t.vulnweb.com/s.asp?q=%3Cscript%3E"),
+            "http://t.vulnweb.com/s.asp?q=test",
+        )
+        # a clean value is left untouched
+        self.assertEqual(
+            sanitize_scan_url("http://t.vulnweb.com/p.asp?id=5"),
+            "http://t.vulnweb.com/p.asp?id=5",
+        )
+
+    def test_planner_dedups_endpoint_variants(self):
+        # id=0, id=1, id=0+and+1=1--[True] must collapse to ONE clean scan target.
+        import shutil
+        td = tempfile.mkdtemp()
+        try:
+            recon = Recon(build_parser().parse_args(["vulnweb.com", "--subdomains", "--out", td]))
+            for v in ("0", "1", "2", "0+and+1=1--%5BTrue%5D"):
+                u = f"http://testasp.vulnweb.com/showforum.asp?id={v}"
+                recon.store.url(u, "gau", probe=True)
+                recon.store.finish(u, {"status": 200})
+            recon.store.commit()
+            asyncio.run(recon.plan_scans())
+            lines = [l for l in (Path(td) / "scan_plan.json").read_text().splitlines() if l.strip()]
+            self.assertEqual(len(lines), 1)                 # 4 variants collapsed to 1
+            self.assertIn("showforum.asp?id=", lines[0])
+            self.assertNotIn("and", lines[0].lower())       # foreign payload stripped
+            self.assertNotIn("true", lines[0].lower())
+            recon.store.conn.close()
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()
