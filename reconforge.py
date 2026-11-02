@@ -75,6 +75,44 @@ DEFAULT_WORDS = [
     "uploads",
 ]
 
+# Dangling-service fingerprints for subdomain takeover. Body markers only — high
+# signal, low false-positive. Service left claimable when the host resolves (or
+# its CNAME NXDOMAINs) and the body matches. See github.com/EdOverflow/can-i-take-over-xyz
+TAKEOVER_FINGERPRINTS = [
+    ("github_pages", re.compile(rb"There isn't a GitHub Pages site here", re.I)),
+    ("heroku", re.compile(rb"No such app|herokucdn\.com/error-pages/no-such-app", re.I)),
+    ("aws_s3", re.compile(rb"NoSuchBucket|The specified bucket does not exist", re.I)),
+    ("fastly", re.compile(rb"Fastly error: unknown domain", re.I)),
+    ("shopify", re.compile(rb"Sorry, this shop is currently unavailable", re.I)),
+    ("surge_sh", re.compile(rb"project not found", re.I)),
+    ("bitbucket", re.compile(rb"Repository not found", re.I)),
+    ("ghost", re.compile(rb"The thing you were looking for is no longer here", re.I)),
+    ("pantheon", re.compile(rb"The gods are wise, but do not know of the site|404 error unknown site", re.I)),
+    ("tilda", re.compile(rb"Please renew your subscription", re.I)),
+    ("cargo", re.compile(rb"If you're moving your domain away from Cargo", re.I)),
+    ("statuspage", re.compile(rb"You are being <a href=\"https://www\.statuspage\.io", re.I)),
+    ("readme_io", re.compile(rb"Project doesnt exist\.\.\. yet!", re.I)),
+    ("azure", re.compile(rb"404 Web Site not found|Error 404 - Web app not found", re.I)),
+    ("netlify", re.compile(rb"Not Found - Request ID", re.I)),
+    ("wpengine", re.compile(rb"The site you were looking for couldn't be found", re.I)),
+]
+
+# GET-only 403/401 bypass primitives. Header probes keep the URL; path probes are
+# re-validated against scope before use. A bypass is a 2xx/3xx whose body differs
+# from the original forbidden response.
+BYPASS_HEADERS = [
+    {"X-Forwarded-For": "127.0.0.1"},
+    {"X-Forwarded-Host": "127.0.0.1"},
+    {"X-Custom-IP-Authorization": "127.0.0.1"},
+    {"X-Originating-IP": "127.0.0.1"},
+    {"X-Remote-IP": "127.0.0.1"},
+    {"X-Remote-Addr": "127.0.0.1"},
+    {"X-Client-IP": "127.0.0.1"},
+    {"X-Host": "127.0.0.1"},
+    {"X-Forwarded-Server": "127.0.0.1"},
+]
+BYPASS_PATH_SUFFIXES = ["/", "/.", "//", "/./", "/%2e/", "/%20", "/..;/", ";/", "/~", "?"]
+
 
 def hostnorm(host: str) -> str:
     host = host.strip().lower().rstrip(".")
@@ -166,10 +204,34 @@ class Store:
                 PRIMARY KEY(kind, fingerprint, source));
             CREATE TABLE IF NOT EXISTS tool_runs(
                 name TEXT, argv TEXT, code INTEGER, seconds REAL, details TEXT);
+            CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE IF NOT EXISTS authz(
+                url TEXT, identity TEXT, status INTEGER, body_hash TEXT, bytes INTEGER,
+                PRIMARY KEY(url, identity));
         """)
         self.conn.commit()
         self.max_urls = max_urls
         self.url_count = self.conn.execute("SELECT COUNT(*) FROM urls").fetchone()[0]
+
+    def get_int(self, key: str, default: int = 0) -> int:
+        row = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        try:
+            return int(row[0]) if row else default
+        except (ValueError, TypeError):
+            return default
+
+    def set_int(self, key: str, value: int) -> None:
+        self.conn.execute(
+            "INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, str(value)),
+        )
+
+    def authz(self, url: str, identity: str, status, body_hash, size) -> None:
+        self.conn.execute(
+            "INSERT INTO authz VALUES(?,?,?,?,?) ON CONFLICT(url,identity) DO UPDATE SET "
+            "status=excluded.status, body_hash=excluded.body_hash, bytes=excluded.bytes",
+            (url, identity, status, body_hash, size),
+        )
 
     def host(self, name: str, source: str) -> None:
         old = self.conn.execute("SELECT sources FROM hosts WHERE host=?", (name,)).fetchone()
@@ -278,17 +340,20 @@ class Throttle:
         self.host_backoff: dict[str, float] = {}
 
     async def take(self, host: str) -> bool:
-        async with self.lock:
-            if self.count >= self.cap:
-                return False
-            delay = max(0.0, self.next_at - time.monotonic(), self.host_backoff.get(host, 0) - time.monotonic())
-            if delay:
-                await asyncio.sleep(delay)
-            if self.count >= self.cap:
-                return False
-            self.count += 1
-            self.next_at = time.monotonic() + (1.0 / self.rate)
-            return True
+        # Never hold the lock across a sleep: a per-host backoff must not stall
+        # other hosts, and the global rate gap is enforced by reserving a slot
+        # (advancing next_at) atomically before releasing.
+        while True:
+            async with self.lock:
+                if self.count >= self.cap:
+                    return False
+                now = time.monotonic()
+                delay = max(0.0, self.next_at - now, self.host_backoff.get(host, 0) - now)
+                if delay <= 0:
+                    self.count += 1
+                    self.next_at = now + (1.0 / self.rate)
+                    return True
+            await asyncio.sleep(delay)
 
     def slow(self, host: str, seconds: float = 15) -> None:
         self.host_backoff[host] = max(self.host_backoff.get(host, 0), time.monotonic() + seconds)
@@ -309,12 +374,20 @@ class Recon:
         self.tool_dir = self.out / "tools"
         self.tool_dir.mkdir(exist_ok=True)
         self.store = Store(self.out / "state.sqlite", a.max_urls)
+        # Resume honours a cumulative request/probe ceiling across runs so repeated
+        # resumes never exceed the authorized budget against the target.
+        self.prior_requests = self.store.get_int("requests_total", 0)
+        self.prior_probes = self.store.get_int("probes_total", 0)
         self.gate = Throttle(a.rate, a.max_requests)
+        self.gate.count = self.prior_requests
         self.sem = asyncio.Semaphore(a.concurrency)
         self.dns_sem = asyncio.Semaphore(a.dns_concurrency)
         self.dns_ok: dict[str, bool] = {}
-        self.probed = 0
+        self.probed = self.prior_probes
         self.js_saved: set[str] = set()
+        self.takeover_hits: list[dict] = []
+        self.bypass_hits: list[dict] = []
+        self.bola_findings: list[dict] = []
 
         headers = {"User-Agent": a.user_agent}
         for h in a.header or []:
@@ -900,6 +973,212 @@ class Recon:
             finally:
                 await browser.close()
 
+    async def raw_get(self, url: str, extra_headers: dict | None = None) -> dict | None:
+        """Scope-safe, throttled, GET-only side-channel fetch that does NOT touch the
+        urls table. Used by the takeover / 403-bypass / authz passes so their probes
+        reuse the same budget and rate limits without polluting discovery output."""
+        p = urlsplit(url)
+        if not p.hostname or not await self.resolves(p.hostname):
+            return None
+        async with self.sem:
+            if not await self.gate.take(p.hostname):
+                return None
+            try:
+                async with self.client.stream("GET", url, headers=extra_headers or None) as resp:
+                    body = bytearray()
+                    async for part in resp.aiter_bytes():
+                        remain = self.a.max_body - len(body)
+                        if remain <= 0:
+                            break
+                        body.extend(part[:remain])
+                        if len(body) >= self.a.max_body:
+                            break
+                    if resp.status_code in (429, 503):
+                        self.gate.slow(p.hostname)
+                    return {
+                        "status": resp.status_code,
+                        "bytes": len(body),
+                        "body_hash": hashlib.sha256(body).hexdigest(),
+                        "content_type": resp.headers.get("content-type", "").split(";")[0].lower(),
+                        "location": resp.headers.get("location", ""),
+                        "body": bytes(body),
+                    }
+            except (httpx.HTTPError, UnicodeError, OSError) as exc:
+                return {"error": type(exc).__name__}
+
+    async def _cname(self, host: str) -> str | None:
+        try:
+            import dns.asyncresolver
+        except ImportError:
+            return None
+        try:
+            answer = await dns.asyncresolver.resolve(host, "CNAME", lifetime=self.a.timeout)
+            return str(answer[0].target).rstrip(".").lower() if answer else None
+        except Exception:
+            return None
+
+    async def takeover(self):
+        """Flag dangling subdomains pointing at unclaimed third-party services."""
+        if not self.a.takeover:
+            return
+        LOG.info("subdomain takeover fingerprinting")
+        have_dns = False
+        try:
+            import dns.asyncresolver  # noqa: F401
+            have_dns = True
+        except ImportError:
+            LOG.info("dnspython absent; takeover uses HTTP body fingerprints only (pip install dnspython for CNAME/NXDOMAIN signals)")
+        hosts = [r[0] for r in self.store.conn.execute("SELECT host FROM hosts ORDER BY host")]
+        for h in hosts[: self.a.max_hosts]:
+            if self.gate.count >= self.a.max_requests:
+                break
+            cname = await self._cname(h) if have_dns else None
+            if cname and not await self.resolves(cname):
+                self.takeover_hits.append({"host": h, "cname": cname, "service": None, "signal": "cname_nxdomain"})
+                continue
+            res = await self.raw_get("https://" + h + "/")
+            if not res or "body" not in res:
+                continue
+            for service, rx in TAKEOVER_FINGERPRINTS:
+                if rx.search(res["body"]):
+                    self.takeover_hits.append(
+                        {"host": h, "cname": cname, "service": service, "status": res["status"], "signal": "http_fingerprint"}
+                    )
+                    LOG.warning("takeover candidate: %s -> %s (%s)", h, service, cname or "no-cname")
+                    break
+        if self.takeover_hits:
+            (self.out / "takeover_candidates.jsonl").write_text(
+                "\n".join(json.dumps(x, ensure_ascii=False) for x in self.takeover_hits) + "\n", encoding="utf8"
+            )
+
+    async def bypass_403(self):
+        """Retry forbidden endpoints with GET-only header/path tricks."""
+        if not self.a.bypass_403:
+            return
+        LOG.info("403/401 bypass attempts")
+        rows = self.store.conn.execute(
+            "SELECT url, body_hash FROM urls WHERE checked=1 AND status IN (401,403) ORDER BY priority DESC LIMIT ?",
+            (self.a.bypass_limit,),
+        ).fetchall()
+        for url, forbidden_hash in rows:
+            p = urlsplit(url)
+            path = p.path or "/"
+            origin = f"{p.scheme}://{p.netloc}/"
+            attempts: list[tuple[str, str, dict | None]] = []
+            for hdr in BYPASS_HEADERS:
+                h = dict(hdr)
+                attempts.append((url, next(iter(hdr)), h))
+            # Header-rewrite primitives that carry the original path
+            for name in ("X-Original-URL", "X-Rewrite-URL"):
+                attempts.append((origin, name, {name: path}))
+            for suffix in BYPASS_PATH_SUFFIXES:
+                candidate = self.scope.url(path.rstrip("/") + suffix if suffix.startswith("/") else path + suffix, base=origin)
+                if candidate and candidate != url:
+                    attempts.append((candidate, "path:" + suffix, None))
+            for target, technique, headers in attempts:
+                if self.gate.count >= self.a.max_requests:
+                    return
+                res = await self.raw_get(target, headers)
+                if res and res.get("status") is not None and res["status"] < 400 and res.get("body_hash") != forbidden_hash:
+                    self.bypass_hits.append(
+                        {"url": url, "technique": technique, "target": target, "status": res["status"], "bytes": res.get("bytes")}
+                    )
+                    LOG.warning("403 bypass: %s via %s -> %s", url, technique, res["status"])
+        if self.bypass_hits:
+            (self.out / "bypass403_candidates.jsonl").write_text(
+                "\n".join(json.dumps(x, ensure_ascii=False) for x in self.bypass_hits) + "\n", encoding="utf8"
+            )
+
+    def parse_identities(self) -> dict[str, dict]:
+        """--identity 'LABEL:Header: Value'; repeat the label to add headers."""
+        identities: dict[str, dict] = {}
+        for spec in self.a.identity or []:
+            label, sep, header = spec.partition(":")
+            label = label.strip()
+            if not sep or not label or ":" not in header:
+                raise SystemExit(f"--identity must be 'LABEL:Header: Value' (got {spec!r})")
+            key, _, value = header.partition(":")
+            key, value = key.strip(), value.strip()
+            if not key or "\n" in header or "\r" in header:
+                raise SystemExit(f"invalid header in --identity {spec!r}")
+            if label.lower() == "anon":
+                raise SystemExit("--identity label 'anon' is reserved")
+            identities.setdefault(label, {})[key] = value
+        return identities
+
+    async def bola(self):
+        """Replay discovered GET endpoints under anon + each test identity and diff
+        the responses. Horizontal-access signal: a resource that is 200 for one
+        identity is also 200 with an identical body for another identity or anon.
+
+        Safety: GET-only, in-scope, budgeted. Both accounts must be test accounts
+        you control and the program authorizes. Does not forge object IDs."""
+        identities = self.parse_identities()
+        if not identities:
+            return
+        LOG.info("authorization matrix across identities: %s", ", ".join(identities))
+        sessions: dict[str, dict] = {"anon": {}}
+        sessions.update(identities)
+        targets = [
+            r[0]
+            for r in self.store.conn.execute(
+                "SELECT url FROM urls WHERE checked=1 AND status BETWEEN 200 AND 399 ORDER BY priority DESC LIMIT ?",
+                (self.a.authz_limit,),
+            )
+            if not UNSAFE_GET.search(urlsplit(r[0]).path)
+        ]
+        matrix: dict[str, dict] = {}
+        for url in targets:
+            if self.gate.count >= self.a.max_requests:
+                break
+            row: dict[str, dict] = {}
+            for label, headers in sessions.items():
+                res = await self.raw_get(url, headers or None)
+                if res and res.get("status") is not None:
+                    self.store.authz(url, label, res["status"], res.get("body_hash"), res.get("bytes"))
+                    row[label] = res
+            matrix[url] = row
+        self.store.commit()
+        labels = list(identities)
+        for url, row in matrix.items():
+            def ok(label):
+                r = row.get(label)
+                return bool(r) and r.get("status", 999) < 400
+
+            def same(a, b):
+                ra, rb = row.get(a), row.get(b)
+                if not ra or not rb:
+                    return False
+                return ra.get("body_hash") == rb.get("body_hash") or (
+                    ra.get("bytes") is not None
+                    and rb.get("bytes") is not None
+                    and abs(ra["bytes"] - rb["bytes"]) < 64
+                )
+
+            # Broken auth: a protected-looking endpoint served to the anonymous client
+            if ok("anon") and re.search(r"/(?:api|admin|internal|account|user|order|invoice|payment)", urlsplit(url).path, re.I):
+                self.bola_findings.append({"url": url, "type": "anonymous_access", "detail": "reachable without any identity"})
+            # Horizontal access: two distinct identities get the identical resource
+            for i in range(len(labels)):
+                for j in range(i + 1, len(labels)):
+                    a, b = labels[i], labels[j]
+                    if ok(a) and ok(b) and same(a, b):
+                        self.bola_findings.append(
+                            {"url": url, "type": "cross_identity_identical", "identities": [a, b],
+                             "detail": "same 2xx body under different accounts — verify object ownership"}
+                        )
+            # Identity sees anon-identical response (token ignored) OR vice-versa
+            for a in labels:
+                if ok(a) and ok("anon") and same(a, "anon"):
+                    self.bola_findings.append(
+                        {"url": url, "type": "auth_not_enforced", "identities": [a, "anon"],
+                         "detail": "authenticated and anonymous responses identical"}
+                    )
+        if self.bola_findings:
+            (self.out / "bola_candidates.jsonl").write_text(
+                "\n".join(json.dumps(x, ensure_ascii=False) for x in self.bola_findings) + "\n", encoding="utf8"
+            )
+
     def export(self):
         self.store.commit()
 
@@ -907,12 +1186,15 @@ class Recon:
             rows = [r[0] for r in self.store.conn.execute(sql)]
             (self.out / name).write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf8")
 
+        # soft-404 calibration markers are internal controls; keep them out of the
+        # human-facing URL lists (they stay in the DB for the CSV's likely_soft404 flag).
+        not_control = "source != 'soft404_control'"
         lines("subdomains.txt", "SELECT host FROM hosts ORDER BY host")
-        lines("urls.txt", "SELECT url FROM urls ORDER BY priority DESC,url")
-        lines("alive.txt", "SELECT url FROM urls WHERE status BETWEEN 200 AND 399 ORDER BY priority DESC")
+        lines("urls.txt", f"SELECT url FROM urls WHERE {not_control} ORDER BY priority DESC,url")
+        lines("alive.txt", f"SELECT url FROM urls WHERE status BETWEEN 200 AND 399 AND {not_control} ORDER BY priority DESC")
         lines(
             "parameterized.txt",
-            "SELECT url FROM urls WHERE status BETWEEN 200 AND 399 AND url LIKE '%?%' ORDER BY priority DESC",
+            f"SELECT url FROM urls WHERE status BETWEEN 200 AND 399 AND url LIKE '%?%' AND {not_control} ORDER BY priority DESC",
         )
         lines(
             "javascript.txt",
@@ -954,6 +1236,20 @@ class Recon:
             for row in self.store.conn.execute("SELECT kind,fingerprint,source,line FROM secret_indicators"):
                 f.write(json.dumps(dict(zip(["kind", "sha256", "source", "line"], row))) + "\n")
 
+        authz_rows = self.store.conn.execute(
+            "SELECT url, identity, status, body_hash, bytes FROM authz ORDER BY url, identity"
+        ).fetchall()
+        if authz_rows:
+            with (self.out / "authz_matrix.csv").open("w", encoding="utf8", newline="") as f:
+                out = csv.writer(f)
+                out.writerow(["url", "identity", "status", "body_hash", "bytes"])
+                out.writerows(authz_rows)
+
+        # Persist cumulative request/probe budget so a resume cannot exceed it.
+        self.store.set_int("requests_total", self.gate.count)
+        self.store.set_int("probes_total", self.probed)
+        self.store.commit()
+
         summary = {
             "scope": self.scope.root,
             "subdomains_in_scope": self.store.count("hosts"),
@@ -965,6 +1261,9 @@ class Recon:
             "alive_urls": self.store.conn.execute("SELECT COUNT(*) FROM urls WHERE status BETWEEN 200 AND 399").fetchone()[0],
             "pending_urls": self.store.conn.execute("SELECT COUNT(*) FROM urls WHERE checked=0").fetchone()[0],
             "manual_review_only": self.store.conn.execute("SELECT COUNT(*) FROM urls WHERE checked=2").fetchone()[0],
+            "takeover_candidates": len(self.takeover_hits),
+            "bypass_403_candidates": len(self.bypass_hits),
+            "bola_candidates": len(self.bola_findings),
             "external_requests_not_in_builtin_budget": True,
             "note": "Candidates are not confirmed vulnerabilities; tool findings require manual verification.",
         }
@@ -1119,6 +1418,9 @@ class Recon:
             await self.wordlist_fuzz()
             await self.ffuf()
             await self.drain(self.a.max_probes)
+            await self.takeover()
+            await self.bypass_403()
+            await self.bola()
             await self.offline_secrets()
             await self.scanners()
         finally:
@@ -1180,6 +1482,17 @@ def build_parser():
     p.add_argument("--scan-limit", type=int, default=30)
     p.add_argument("--nuclei-tags")
     p.add_argument("--nuclei-templates")
+    p.add_argument("--takeover", action="store_true", default=True, help="fingerprint dangling subdomains for takeover")
+    p.add_argument("--no-takeover", dest="takeover", action="store_false")
+    p.add_argument("--bypass-403", action="store_true", help="retry 401/403 endpoints with GET-only header/path tricks")
+    p.add_argument("--bypass-limit", type=int, default=50, help="max forbidden endpoints to attempt bypass on")
+    p.add_argument(
+        "--identity",
+        action="append",
+        default=[],
+        help="test identity for BOLA/IDOR authz matrix, 'LABEL:Header: Value' (repeat to add headers); use only accounts you control and the program authorizes",
+    )
+    p.add_argument("--authz-limit", type=int, default=50, help="max endpoints replayed per identity in the authz matrix")
     return p
 
 
@@ -1191,6 +1504,7 @@ def main():
     except (ValueError, UnicodeError) as exc:
         raise SystemExit(f"Invalid domain: {exc}") from exc
     a.initial_probes = min(a.initial_probes, a.max_probes)
+    a.max_body = max(1, min(a.max_body, 20_000_000))  # hard 20MB ceiling per response
     if not (
         1 <= a.rate <= 30
         and 1 <= a.concurrency <= 30
@@ -1199,6 +1513,8 @@ def main():
         and a.max_urls >= 1
         and a.max_hosts >= 1
         and a.scan_limit >= 1
+        and a.bypass_limit >= 1
+        and a.authz_limit >= 1
         and a.crawl_depth in range(1, 8)
         and a.timeout >= 1
         and a.tool_timeout >= 1
@@ -1214,6 +1530,12 @@ def main():
         raise SystemExit("Invalid user-agent")
     if any(not p.startswith("/") or any(c in p for c in "\r\n?#") for p in a.exclude_path):
         raise SystemExit("--exclude-path must be a literal URL path prefix beginning with /")
+    for spec in a.identity:
+        label, sep, header = spec.partition(":")
+        if not sep or not label.strip() or ":" not in header or "\r" in header or "\n" in header:
+            raise SystemExit(f"--identity must be 'LABEL:Header: Value' (got {spec!r})")
+        if label.strip().lower() == "anon":
+            raise SystemExit("--identity label 'anon' is reserved")
     asyncio.run(Recon(a).run())
 
 

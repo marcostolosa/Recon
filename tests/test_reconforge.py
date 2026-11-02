@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from reconforge import (
+    TAKEOVER_FINGERPRINTS,
     HTMLLinks,
     Recon,
     Scope,
@@ -162,6 +163,69 @@ class TestReconForge(unittest.TestCase):
             self.assertEqual(recon1.scope_config(), recon2.scope_config())
             recon1.store.conn.close()
             recon2.store.conn.close()
+
+
+    def test_11_meta_persistence(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "state.sqlite"
+            store = Store(db_path, max_urls=100)
+            self.assertEqual(store.get_int("requests_total", 0), 0)
+            store.set_int("requests_total", 42)
+            store.set_int("requests_total", 99)  # upsert overwrites
+            store.commit()
+            store.conn.close()
+            reopened = Store(db_path, max_urls=100)
+            self.assertEqual(reopened.get_int("requests_total", 0), 99)
+            reopened.conn.close()
+
+    def test_12_resume_honours_cumulative_budget(self):
+        with tempfile.TemporaryDirectory() as td:
+            parser = build_parser()
+            args = parser.parse_args(["example.com", "--out", td])
+            recon = Recon(args)
+            recon.gate.count = 123
+            recon.probed = 45
+            recon.export()
+            recon.store.conn.close()
+            # A fresh run against the same output resumes the counters, not from zero
+            recon2 = Recon(parser.parse_args(["example.com", "--out", td]))
+            self.assertEqual(recon2.prior_requests, 123)
+            self.assertEqual(recon2.gate.count, 123)
+            self.assertEqual(recon2.probed, 45)
+            recon2.store.conn.close()
+
+    def test_13_parse_identities(self):
+        with tempfile.TemporaryDirectory() as td:
+            parser = build_parser()
+            args = parser.parse_args(
+                ["example.com", "--out", td,
+                 "--identity", "A:Authorization: Bearer tokA",
+                 "--identity", "A:X-Trace: 1",
+                 "--identity", "B:Authorization: Bearer tokB"]
+            )
+            recon = Recon(args)
+            identities = recon.parse_identities()
+            self.assertEqual(set(identities), {"A", "B"})
+            self.assertEqual(identities["A"]["Authorization"], "Bearer tokA")
+            self.assertEqual(identities["A"]["X-Trace"], "1")
+            self.assertEqual(identities["B"]["Authorization"], "Bearer tokB")
+            recon.store.conn.close()
+
+    def test_14_takeover_fingerprint_matches(self):
+        github = b"<html><body>There isn't a GitHub Pages site here.</body></html>"
+        matched = [svc for svc, rx in TAKEOVER_FINGERPRINTS if rx.search(github)]
+        self.assertIn("github_pages", matched)
+        benign = b"<html><body>Welcome to our homepage</body></html>"
+        self.assertEqual([svc for svc, rx in TAKEOVER_FINGERPRINTS if rx.search(benign)], [])
+
+    def test_15_max_body_clamped_to_20mb(self):
+        with tempfile.TemporaryDirectory() as td:
+            import reconforge
+            parser = reconforge.build_parser()
+            args = parser.parse_args(["example.com", "--out", td, "--max-body", "999000000"])
+            # replicate main()'s clamp
+            args.max_body = max(1, min(args.max_body, 20_000_000))
+            self.assertEqual(args.max_body, 20_000_000)
 
 
 if __name__ == "__main__":

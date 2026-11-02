@@ -115,10 +115,34 @@ python reconforge.py example.com --subdomains \
 ```
 
 ### 5. Retomada de Sessão (Resume)
-Reutilize o mesmo diretório `--out` e configurações de escopo. As URLs já verificadas não serão requisitadas novamente:
+Reutilize o mesmo diretório `--out` e configurações de escopo. As URLs já verificadas não serão requisitadas novamente. O orçamento de requisições (`--max-requests` / `--max-probes`) é **cumulativo entre retomadas** — resumir nunca excede o teto autorizado contra o alvo:
 ```bash
 python reconforge.py example.com --subdomains --out runs/example-full
 ```
+
+### 6. Módulos de Segurança (findings-oriented)
+
+Todos são **GET-only**, respeitam escopo, rate e orçamento. Use apenas em programas autorizados.
+
+**Subdomain Takeover** (ligado por padrão; `--no-takeover` desativa). Faz fingerprint de serviços de terceiros não reivindicados. Com `dnspython` instalado, também detecta CNAME apontando para alvo NXDOMAIN:
+```bash
+python reconforge.py example.com --subdomains --out runs/example
+```
+
+**Bypass de 403/401** (`--bypass-403`). Reataca endpoints proibidos com truques GET-only de header (`X-Forwarded-For`, `X-Original-URL`, ...) e de path (`/`, `//`, `/..;/`, `/%2e/`, ...). Flag só o que retorna 2xx/3xx com corpo diferente do 403 original:
+```bash
+python reconforge.py example.com --subdomains --bypass-403 --bypass-limit 50 --out runs/example
+```
+
+**Matriz de Autorização BOLA/IDOR** (`--identity`). Repete os endpoints descobertos sob `anon` + cada identidade de teste e compara `status`+`hash` do corpo. Sinaliza acesso anônimo a rotas protegidas, respostas idênticas entre contas distintas (acesso horizontal) e token ignorado. **Use só contas de teste que você controla e que o programa autoriza — não forja IDs de terceiros:**
+```bash
+python reconforge.py example.com --subdomains \
+  --identity "A:Authorization: Bearer <tokenContaA>" \
+  --identity "B:Authorization: Bearer <tokenContaB>" \
+  --authz-limit 50 \
+  --out runs/example
+```
+Repita o mesmo rótulo (`A:...`) para somar vários headers à mesma identidade.
 
 ---
 
@@ -137,6 +161,9 @@ Todas as evidências são estruturadas no diretório de saída:
 - `http.jsonl`: Logs estruturados de respostas HTTP com title, content-type e hash SHA-256 do corpo.
 - `secret_indicators.jsonl`: Indicadores de credenciais encontradas em código frontend (sem expor valores sensíveis em texto puro).
 - `url_provenance.jsonl`: Rastreamento da procedência de cada link (qual crawler ou ferramenta descobriu o endpoint).
+- `takeover_candidates.jsonl`: Subdomínios com assinatura de serviço de terceiros não reivindicado (candidatos a takeover).
+- `bypass403_candidates.jsonl`: Endpoints 401/403 que cederam a alguma técnica GET-only de bypass, com a técnica usada.
+- `bola_candidates.jsonl` / `authz_matrix.csv`: Candidatos a BOLA/IDOR e a matriz bruta de resposta por identidade (`anon`/A/B) para verificação manual.
 - `js/*.js`: Bundles JavaScript arquivados localmente para análise estática offline.
 - `tools/*.stdout` / `*.stderr`: Logs de execução de ferramentas externas.
 
@@ -155,5 +182,6 @@ python -m unittest discover -s tests -v
 ## 🗺️ Roadmap para a v3
 
 1. **Captura de Tráfego Autenticado:** Mapeamento de sessões e extração de tokens JWT para crawling com privilégios.
-2. **Matriz de Autorização Automatizada:** Testes diferenciais com duas contas de teste de níveis distintos para detecção de BOLA / IDOR.
+2. ~~**Matriz de Autorização Automatizada:** Testes diferenciais com duas contas de teste.~~ ✅ Implementado via `--identity` (ver seção 6).
 3. **Favicon MurmurHash3:** Pivoting automático em motores como Shodan/Censys para descoberta de IPs de origem ocultos por CDN.
+4. **GraphQL introspection + expansão de OpenAPI:** gerar corpus de requests concretos a partir de schemas descobertos.
