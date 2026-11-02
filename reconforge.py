@@ -1442,6 +1442,7 @@ class Recon:
         self.bypass_hits: list[dict] = []
         self.bola_findings: list[dict] = []
         self.scan_plan_count = 0
+        self.active_procs: set = set()
         self.origin_clients: dict[str, httpx.AsyncClient] = {}
         self.client = self.make_client()
         self.passive_client = self.make_client()
@@ -1524,6 +1525,12 @@ class Recon:
         return self.origin_clients[origin]
 
     async def aclose(self):
+        for proc in list(getattr(self, "active_procs", [])):
+            try:
+                await self.stop_process(proc)
+            except Exception:
+                pass
+        self.active_procs.clear()
         clients = [self.client, self.passive_client, *self.origin_clients.values()]
         try:
             for client in clients:
@@ -1605,6 +1612,7 @@ class Recon:
             with path.open("wb") as stdout, errpath.open("wb") as stderr:
                 proc = await asyncio.create_subprocess_exec(*argv, stdout=stdout, stderr=stderr,
                     **({"start_new_session": True} if os.name == "posix" else {}))
+                self.active_procs.add(proc)
                 try:
                     if _RICH and CONSOLE.is_terminal and not getattr(CONSOLE, "_live", None):
                         with CONSOLE.status(
@@ -1630,6 +1638,9 @@ class Recon:
             if proc is not None:
                 await self.stop_process(proc)
             raise
+        finally:
+            if proc is not None:
+                self.active_procs.discard(proc)
         self.store.tool(name, [self.redact(v) for v in argv], code, time.monotonic() - started, self.redact(details))
         return path if path.exists() else None
 
@@ -1739,6 +1750,9 @@ class Recon:
         self.put_host(self.scope.root, "seed")
         self.put_url("https://" + self.scope.root + "/", "seed")
         LOG.info("passive enumeration: %s", self.scope.root)
+        if self.store.get_int("stage_passive_done", 0) == 1:
+            ui_event("RESUME", f"Enumeração passiva já concluída anteriormente ({self.store.count('hosts')} subdomínios em cache). Pulando...", C_OK)
+            return
         if not self.a.no_enum:
             if self.a.ct:
                 await self.ct_provider("crtsh", "https://crt.sh/", {"q": "%." + self.scope.root, "output": "json"})
@@ -1772,6 +1786,7 @@ class Recon:
                     word = word.strip().lower()
                     if re.fullmatch(r"[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63})*", word):
                         self.put_host(word + "." + self.scope.root, "dns_wordlist")
+        self.store.set_int("stage_passive_done", 1)
         self.store.commit()
 
     async def resolves(self, host: str) -> bool:
@@ -1812,6 +1827,9 @@ class Recon:
             ui_event("DNS", "Wildcard DNS: negativo (respostas NXDOMAIN normais)", "dim")
 
     async def seed_hosts(self):
+        if self.store.get_int("stage_seed_hosts_done", 0) == 1:
+            ui_event("RESUME", f"Hosts já resolvidos e semeados anteriormente ({self.store.count('hosts')} hosts). Pulando resolução inicial...", C_OK)
+            return
         await self.detect_dns_wildcard()
         hosts = [
             r[0]
@@ -1852,6 +1870,7 @@ class Recon:
         else:
             for i in range(0, len(hosts), chunk_size):
                 await asyncio.gather(*(one(h) for h in hosts[i : i + chunk_size]))
+        self.store.set_int("stage_seed_hosts_done", 1)
         self.store.commit()
         ui_event("DNS", f"Resolução concluída: [bold]{resolved_count}/{len(hosts)}[/bold] subdomínios com IP público válido", C_OK if resolved_count else C_WARN)
 
@@ -2963,6 +2982,7 @@ class Recon:
         dashboard = VisualDashboard(self) if getattr(self.a, "visual", False) else None
         if dashboard:
             await dashboard.start()
+        interrupted = False
         try:
             self.current_phase = "Fase 1 • Descoberta Passiva & DNS"
             print_phase("Fase 1", "Descoberta Passiva & DNS Enumeration")
@@ -3000,14 +3020,26 @@ class Recon:
             print_phase("Fase 6", "Scan Planner & Scanners Direcionados")
             await self.scanners()
             await self.plan_scans()
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            interrupted = True
+            raise
         finally:
-            self.current_phase = "Concluído • Relatório & Dashboard Gerados"
-            print_phase("Fase 7", "Exportação de Artefatos & Relatório Final")
+            if interrupted:
+                self.current_phase = "Pausado (Ctrl+C) • Progresso Salvo"
+                if _RICH and CONSOLE.is_terminal:
+                    print_phase("Pausa", "Execução Interrompida — Salvando Estado no SQLite")
+            else:
+                self.current_phase = "Concluído • Relatório & Dashboard Gerados"
+                print_phase("Fase 7", "Exportação de Artefatos & Relatório Final")
             self.export()
             if dashboard:
-                await asyncio.sleep(1.2)
-                await dashboard.stop()
-                ui_event("VISUAL-UI", f"Dashboard estático salvo em: [bold white]{self.out / 'dashboard.html'}[/bold white]", C_OK)
+                try:
+                    await asyncio.sleep(0.5)
+                    await dashboard.stop()
+                except Exception:
+                    pass
+                if not interrupted:
+                    ui_event("VISUAL-UI", f"Dashboard estático salvo em: [bold white]{self.out / 'dashboard.html'}[/bold white]", C_OK)
 
 
 def build_parser():
@@ -3169,7 +3201,16 @@ def main():
         if label.strip().lower() == "anon":
             raise SystemExit("--identity label 'anon' is reserved")
     print_banner(a)
-    asyncio.run(Recon(a).run())
+    try:
+        asyncio.run(Recon(a).run())
+    except KeyboardInterrupt:
+        if _RICH and CONSOLE.is_terminal:
+            CONSOLE.print("\n[bold yellow]⚠ ReconForge pausado com segurança (Ctrl+C).[/bold yellow]")
+            CONSOLE.print(f"[dim]Todo o progresso até aqui (subdomínios, URLs testadas, findings) está salvo em:[/dim] [bold white]{a.out}[/bold white]")
+            CONSOLE.print(f"[bold cyan]→ Para continuar de onde parou, basta rodar o mesmo comando:[/bold cyan]")
+            CONSOLE.print(f"  [dim]python reconforge.py {a.domain} {'--subdomains ' if a.subdomains else ''}--out {a.out}[/dim]\n")
+        else:
+            LOG.info("ReconForge pausado pelo usuário (Ctrl+C). Progresso salvo em %s. Rode novamente para continuar.", a.out)
 
 
 if __name__ == "__main__":
