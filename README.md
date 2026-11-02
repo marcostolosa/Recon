@@ -1,262 +1,159 @@
-# CVE-Hunters Recon Script
+# ReconForge v2 — Pipeline de Reconhecimento para Bug Bounty
 
-<div align="center">
-
-```
-  ██████╗██╗   ██╗███████╗    ██╗  ██╗██╗   ██╗███╗   ██╗████████╗███████╗██████╗ ███████╗
- ██╔════╝██║   ██║██╔════╝    ██║  ██║██║   ██║████╗  ██║╚══██╔══╝██╔════╝██╔══██╗██╔════╝
- ██║     ██║   ██║█████╗      ███████║██║   ██║██╔██╗ ██║   ██║   █████╗  ██████╔╝███████╗
- ██║     ╚██╗ ██╔╝██╔══╝      ██╔══██║██║   ██║██║╚██╗██║   ██║   ██╔══╝  ██╔══██╗╚════██║
- ╚██████╗ ╚████╔╝ ███████╗    ██║  ██║╚██████╔╝██║ ╚████║   ██║   ███████╗██║  ██║███████║
-  ╚═════╝  ╚═══╝  ╚══════╝    ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚══════╝
-```
-
-**Automated reconnaissance framework for bug bounty and penetration testing**
-
-[![Language](https://img.shields.io/badge/Language-Bash-green.svg)](https://www.gnu.org/software/bash/)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tools](https://img.shields.io/badge/Tools-30+-orange.svg)](#tools)
-[![Status](https://img.shields.io/badge/Status-Production--Ready-success.svg)](#)
-
-</div>
+Framework de reconhecimento modular, assíncrono e orientado a escopo estrito em Python 3, projetado para transformar um único domínio em um inventário priorizado de superfície de ataque, reduzindo ruído e protegendo contra requisições destrutivas.
 
 ---
 
-## Overview
+## 🎯 Arquitetura e Filosofia
 
-CVE-Hunters is a comprehensive reconnaissance automation framework that orchestrates **30+ security tools** in a sequential pipeline with **checkpoint support**, **intelligent result merging**, and **real-time progress tracking**.
+ReconForge v2 substitui pipelines legados frágeis de bash por um motor assíncrono robusto (`asyncio` + `httpx` + `sqlite3`), garantindo:
 
-## Installation
+```
+[Domínio + Regras de Escopo]
+        │
+        ├── DNS & Certificate Transparency (crt.sh, CertSpotter, Subfinder, Amass)
+        ├── Descoberta Histórica (gau, Wayback)
+        ├── Crawling Inteligente (Katana, JSLuice, Headless Browser)
+        │
+        ▼
+[Normalização & Deduplicação (SQLite WAL)]
+        │
+        ├── Extração de Segredos & Sourcemaps (Gitleaks, TruffleHog, Regex)
+        ├── Fuzzing Contextual Controlado (Orçamento próprio / ffuf)
+        └── Scanners Direcionados (Nuclei, Dalfox v3, SQLMap - Opt-in)
+        │
+        ▼
+[Artefatos, Priorização & Evidências] (priority.csv, http.jsonl, state.sqlite)
+```
 
-### Quick Install
+---
+
+## ⚡ Diferenciais da Versão 2
+
+| Capacidade | Implementação na v2 |
+| :--- | :--- |
+| **Persistência e Retomada** | SQLite em modo WAL com deduplicação atômica, histórico de fontes (`url_sources`) e resume seguro. |
+| **Proteção de Escopo Estrito** | Normalização IDNA/RFC, checagem recursiva de subdomínios, bloqueio de portas arbitrárias e descarte de OOS. |
+| **Segurança Operacional** | Heurística anti-destrutiva (`UNSAFE_GET` para rotas como `/logout`, `/delete`), anti-SSRF para redes privadas. |
+| **Rate Limiting Centralizado** | Controle de requisições (`Throttle`) com backoff automático em 429/503 e teto global (`--max-requests`). |
+| **Análise Profunda de JS & APIs** | Extração de chamadas relativas, endpoints em schemas OpenAPI/Swagger, sourcemaps e fingerprints de credenciais (SHA-256). |
+| **Renderização Dinâmica** | Suporte integrado opcional a Chromium/Playwright com interceptação de rotas e monitoramento de requests DOM. |
+| **Scanners Direcionados** | Integração opt-in e em lote com Nuclei, Dalfox v3 (`dalfox scan`) e SQLMap apenas para endpoints relevantes. |
+
+---
+
+## 📦 Instalação
+
+### Requisitos
+- **Python 3.10+** (Testado em Python 3.11, 3.12 e 3.14 no Kali, Debian/Ubuntu, macOS e Windows).
 
 ```bash
+# 1. Clone o repositório
 git clone https://github.com/marcostolosa/Recon.git
 cd Recon/
-chmod +x recon.sh installation.sh
-./installation.sh
+
+# 2. Crie e ative o ambiente virtual
+python3 -m venv .venv
+source .venv/bin/activate  # No Windows: .venv\Scripts\activate
+
+# 3. Instale as dependências Python
+pip install -r requirements.txt
+
+# 4. (Opcional) Instale o suporte a navegador headless
+playwright install chromium
 ```
 
-**Supported Distributions:**
-- Kali Linux
-- Arch Linux / BlackArch
-- Ubuntu / Debian
-- Parrot Security OS
+> **Ferramentas externas opcionais:** `subfinder`, `amass`, `gau`, `katana`, `ffuf`, `nuclei`, `dalfox`, `sqlmap`, `gitleaks`, `trufflehog`.
+> Se alguma ferramenta externa não estiver no `PATH`, o ReconForge apenas registra um aviso e prossegue sem quebrar a execução.
 
-### Manual Installation
+---
 
-If the installer doesn't work, install dependencies manually:
+## 🚀 Como Usar
+
+### 1. Reconhecimento Passivo Estrito
+Consulta fontes públicas de Certificados (CT) e coletores passivos sem enviar tráfego ativo:
+```bash
+python reconforge.py example.com --subdomains --passive-only --out runs/example-passive
+```
+
+### 2. Reconhecimento Ativo Completo Autorizado
+Executa descoberta, crawling iterativo, extração profunda de JS e orçamento de fuzzing:
+```bash
+python reconforge.py example.com \
+  --subdomains \
+  --exclude staging.example.com \
+  --exclude-path /logout \
+  --exclude-path /billing \
+  --katana \
+  --jsluice \
+  --fuzz \
+  --rate 3 \
+  --concurrency 5 \
+  --max-hosts 300 \
+  --max-probes 4000 \
+  --max-requests 6000 \
+  --out runs/example-full
+```
+
+### 3. Cabeçalho de Identificação para Bug Bounty
+Programas no HackerOne e Bugcrowd frequentemente exigem headers de identificação:
+```bash
+python reconforge.py example.com --subdomains \
+  -H "X-Bug-Bounty: hackerone-username" \
+  -H "Contact: researcher@security.org" \
+  --out runs/example-id
+```
+
+### 4. Execução de Scanners Direcionados (Opt-in)
+Dispara testes focados em endpoints previamente validados e filtrados:
+```bash
+python reconforge.py example.com --subdomains \
+  --scanners nuclei dalfox \
+  --nuclei-tags exposure,misconfig \
+  --scan-limit 25 \
+  --out runs/example-scanners
+```
+
+### 5. Retomada de Sessão (Resume)
+Reutilize o mesmo diretório `--out` e configurações de escopo. As URLs já verificadas não serão requisitadas novamente:
+```bash
+python reconforge.py example.com --subdomains --out runs/example-full
+```
+
+---
+
+## 📁 Artefatos Gerados
+
+Todas as evidências são estruturadas no diretório de saída:
+
+- `state.sqlite`: Base relacional completa com inventário, estado de fila, status HTTP e logs de execução.
+- `priority.csv`: Fila ordenada por criticidade e probabilidade de vulnerabilidade com identificação de Soft-404.
+- `subdomains.txt`: Lista limpa e deduplicada de subdomínios in-scope.
+- `urls.txt`: Todos os endpoints normalizados em escopo.
+- `alive.txt`: Endpoints com retorno HTTP 2xx e 3xx.
+- `parameterized.txt`: URLs com query strings prontas para testes de injeção.
+- `javascript.txt`: Inventário de arquivos `.js`, `.mjs` e `.map`.
+- `manual-review-only.txt`: Endpoints potencialmente destrutivos ou formulários POST preservados apenas para auditoria manual.
+- `http.jsonl`: Logs estruturados de respostas HTTP com title, content-type e hash SHA-256 do corpo.
+- `secret_indicators.jsonl`: Indicadores de credenciais encontradas em código frontend (sem expor valores sensíveis em texto puro).
+- `url_provenance.jsonl`: Rastreamento da procedência de cada link (qual crawler ou ferramenta descobriu o endpoint).
+- `js/*.js`: Bundles JavaScript arquivados localmente para análise estática offline.
+- `tools/*.stdout` / `*.stderr`: Logs de execução de ferramentas externas.
+
+---
+
+## 🧪 Testes Automatizados
+
+O motor possui suíte de testes unitários cobrindo normalização IDNA, regras de escopo, parser de HTML, extração de APIs/JSON, SQLite, controle de taxa e determinismo de resume:
 
 ```bash
-# Go tools
-go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-go install -v github.com/tomnomnom/assetfinder@latest
-go install -v github.com/tomnomnom/httprobe@latest
-go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-go install -v github.com/projectdiscovery/nuclei/v2/cmd/nuclei@latest
-go install -v github.com/hakluke/hakrawler@latest
-go install -v github.com/tomnomnom/waybackurls@latest
-go install -v github.com/ffuf/ffuf@latest
-go install -v github.com/hahwul/dalfox/v2@latest
-go install -v github.com/tomnomnom/anew@latest
-go install -v github.com/tomnomnom/qsreplace@latest
-go install -v github.com/jaeles-project/gospider@latest
-go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
-go install -v github.com/haccer/subjack@latest
-go install -v github.com/tomnomnom/gf@latest
-go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
-go install -v github.com/003random/getJS@latest
-go install -v github.com/projectdiscovery/katana/cmd/katana@latest
-
-# Python tools
-pip3 install wafw00f sublist3r metabigor
-
-# System tools (Ubuntu/Debian)
-sudo apt install -y masscan nmap dnsrecon dnsenum
-
-# System tools (Arch)
-sudo pacman -S masscan nmap dnsrecon
+python -m unittest discover -s tests -v
 ```
 
 ---
 
-## Usage
+## 🗺️ Roadmap para a v3
 
-### Basic Scan
-
-```bash
-./recon.sh -d target.com -w wordlists/common.txt
-```
-
-### Complete Scan with All Features
-
-```bash
-./recon.sh -d target.com -w wordlists/big.txt \
-  -g <github-api-key> \
-  -s <shodan-api-key> \
-  -f \
-  -D \
-  -P
-```
-
-### Quiet Mode (Minimal Output)
-
-```bash
-./recon.sh -d target.com -w wordlists/common.txt -q
-```
-
-### Custom Output Directory
-
-```bash
-./recon.sh -d target.com -w wordlists/big.txt -o /custom/path
-```
-
-### Resume Interrupted Scan
-
-```bash
-# First run - interrupted after 5 stages
-./recon.sh -d target.com -w wordlists/common.txt
-^C  # Ctrl+C
-
-# Second run - continues from stage 6 automatically
-./recon.sh -d target.com -w wordlists/common.txt
-# Output: [⏭️ ] Etapa 'asn_enum' já completa, pulando...
-```
-
----
-
-## Command Line Options
-
-| Option | Required | Description |
-|--------|----------|-------------|
-| **-d** | Yes | Target domain |
-| **-w** | Yes | Wordlist path (see `wordlists/` directory) |
-| **-g** | No | GitHub API key (improves subdomain enum) |
-| **-s** | No | Shodan API key (**Premium required**) |
-| **-o** | No | Custom output folder (default: `./domain`) |
-| **-q** | No | Quiet mode (minimal console output) |
-| **-f** | No | Enable fuzzing mode (validates vulnerabilities) |
-| **-D** | No | Enable directory fuzzing (slow, uses ffuf) |
-| **-P** | No | Enable port scanning (requires sudo for masscan) |
-
-### Wordlist Options
-
-Choose wordlist based on scan thoroughness:
-
-| Wordlist | Size | Scan Time | Use Case |
-|----------|------|-----------|----------|
-| `small.txt` | ~100 | 5-10 min | Quick test |
-| `common.txt` | ~1000 | 15-30 min | Standard scan |
-| `big.txt` | ~5000 | 1-2 hours | Deep scan |
-| `all.txt` | ~100k | 4-8 hours | Comprehensive |
-
----
-
-## Pipeline Stages
-
-The script executes **17 stages** sequentially:
-
-| # | Stage | Tool(s) | Output |
-|---|-------|---------|--------|
-| 1 | ASN Enumeration | metabigor | ASNs, IP ranges |
-| 2 | Subdomain Enumeration | assetfinder, subfinder, crt.sh, findomain, sublist3r, knockpy, github-subdomains (7 tools) | All discovered subdomains |
-| 3 | Organize Domains | regex | Domains by level (2nd, 3rd, 4th+) |
-| 4 | DNS Lookup | dnsx, dnsrecon, dnsenum | IPs, DNS records |
-| 5 | Check Active | httprobe, httpx | HTTP/HTTPS responsive domains |
-| 6 | WAF Detection | wafw00f | Firewall identification |
-| 7 | Subdomain Takeover | subjack | Vulnerable subdomains |
-| 8 | Favicon Analysis | FavFreak | Favicon hashes for Shodan |
-| 9 | Directory Fuzzing | ffuf | Hidden directories (optional -D) |
-| 10 | Credential Stuffing | CredStuff-Auxiliary | Leaked credentials |
-| 11 | Google Dorks | Custom | Google search queries |
-| 12 | GitHub Dorks | Custom | GitHub code searches |
-| 13 | Screenshots | EyeWitness | Visual recon |
-| 14 | Port Scanning | masscan, nmap, naabu, Rustscan | Open ports (optional -P) |
-| 15 | Link Discovery | hakrawler, katana, waybackurls, gau | Crawled URLs (parallel execution: 20 threads) |
-| 16 | Endpoints Enumeration | ParamSpider, gospider, getJS | URLs with parameters |
-| 17 | Vulnerability Scan | Nuclei, Xsstrike, Dalfox, Gxss, gf | XSS, SQLi, LFI, RCE candidates (optimized Nuclei) |
-
----
-
-## Output Structure
-
-```
-output_folder/
-├── .checkpoint                    # Resume state
-├── asn/
-│   └── org.txt                    # ASN ranges
-├── subdomains/
-│   ├── subdomains.txt             # All discovered subdomains
-│   ├── alive.txt                  # Active HTTP/HTTPS hosts
-│   ├── waf.txt                    # WAF detection results
-│   ├── level-domains.txt          # Organized by domain level
-│   ├── knockpy/                   # Knockpy DNS results
-│   └── subdomain-takeover/
-│       └── takeover.txt           # Vulnerable subdomains
-├── DNS/
-│   ├── dns.txt                    # DNS responses
-│   ├── ip_only.txt                # Extracted IPs
-│   ├── dnsrecon.txt               # DNSrecon output
-│   └── dnsenum.xml                # DNSenum results
-├── favicon-analysis/
-│   ├── favfreak/*.txt             # Favicon hashes
-│   ├── shodan-results.txt         # Automated Shodan queries
-│   └── shodan-manual.txt          # Manual Shodan dorks
-├── dorks/
-│   ├── google-dorks/dorks.txt     # Google search queries
-│   ├── github-dorks/*.txt         # GitHub search links
-│   └── credstuff/                 # Credential stuffing results
-├── domain-screenshots/            # EyeWitness HTML report
-├── fuzz/                          # Directory fuzzing results (if -D)
-├── portscan/                      # Port scan results (if -P)
-│   ├── nmap.txt
-│   ├── masscan.txt
-│   └── naabu.txt
-├── link-discovery/
-│   ├── all.txt                    # All discovered URLs
-│   ├── hakrawler/*.txt            # Hakrawler per-domain
-│   ├── katana/*.txt               # Katana crawler per-domain
-│   ├── waybackurls/*.txt          # Wayback URLs per-domain
-│   └── js/
-│       ├── js.txt                 # All JS files
-│       └── AliveJS.txt            # Accessible JS files
-└── vuln/
-    ├── nuclei.txt                 # Nuclei scan results
-    ├── xss-discovery/
-    │   ├── possíveis-xss.txt      # XSS candidates
-    │   └── xss.txt                # Confirmed XSS (if -f)
-    ├── 403.txt                    # 403 Forbidden responses
-    ├── possíveis-open-redir.txt   # Open redirect candidates
-    ├── rce.txt                    # RCE candidates
-    ├── lfi.txt                    # LFI candidates
-    └── possíveis-sqli.txt         # SQLi candidates
-```
-
----
-
-## License
-
-MIT License - see [LICENSE](LICENSE) file
-
----
-
-## Legal Disclaimer
-
-**This tool is for authorized security testing only.**
-
-- **Authorized Use:** Bug bounty programs, pentesting engagements, CTFs, security research with permission
-- **Prohibited:** Unauthorized scanning, malicious use, attacks without consent
-
-**Always obtain written authorization before scanning targets you don't own.**
-
----
-
-<div align="center">
-
-**Made with by the security community**
-
-**CVE-Hunters Team | 2025**
-
-[Report Issues](https://github.com/marcostolosa/Recon/issues)
-
-</div>
+1. **Captura de Tráfego Autenticado:** Mapeamento de sessões e extração de tokens JWT para crawling com privilégios.
+2. **Matriz de Autorização Automatizada:** Testes diferenciais com duas contas de teste de níveis distintos para detecção de BOLA / IDOR.
+3. **Favicon MurmurHash3:** Pivoting automático em motores como Shodan/Censys para descoberta de IPs de origem ocultos por CDN.

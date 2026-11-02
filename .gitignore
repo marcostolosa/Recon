@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+
+# Output and recon data
+reconforge-output/
+runs/
+*.sqlite
+*.sqlite3
+*.db
+tools/*.stdout
+tools/*.stderr
+
+# OS
+.DS_Store
+Thumbs.db
