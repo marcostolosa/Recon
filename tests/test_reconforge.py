@@ -442,6 +442,26 @@ class TestScanTargetingFixes(unittest.TestCase):
             top_urls=[(95, 200, "api,admin", "katana", "https://api.example.com/admin/v1/users")],
         )
 
+    def test_visual_dashboard_and_js_intel(self):
+        import shutil
+        td = tempfile.mkdtemp()
+        try:
+            a = build_parser().parse_args(["example.com", "--subdomains", "--visual", "--out", td])
+            recon = Recon(a)
+            recon.analyze_js(
+                "https://example.com/static/app.js",
+                'fetch("/api/v2/users?id=1"); const u = "https://api.example.com/v1/GraphQL"; //# sourceMappingURL=app.js.map',
+            )
+            st = recon.dashboard_state()
+            self.assertEqual(st["js_count"], 1)
+            self.assertTrue(st["js_intel"][0]["sourcemap"])
+            self.assertIn("/api/v2/users?id=1", st["js_intel"][0]["routes"])
+            recon.export()
+            self.assertTrue((Path(td) / "dashboard.html").exists())
+            asyncio.run(recon.aclose())
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

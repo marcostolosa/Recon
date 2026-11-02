@@ -102,9 +102,9 @@ def _active_features(a) -> list[str]:
     feats = []
     for flag, label in (
         ("ct", "CT"), ("subfinder", "subfinder"), ("amass", "amass"), ("gau", "gau"),
-        ("katana", "katana"), ("browser", "browser"), ("fuzz", "fuzz"), ("ffuf", "ffuf"),
-        ("takeover", "takeover"), ("bypass_403", "403-bypass"), ("gitleaks", "gitleaks"),
-        ("trufflehog", "trufflehog"), ("auto_scan", "auto-scan"),
+        ("katana", "katana"), ("browser", "browser"), ("headed", "headed"), ("visual", "visual-gui"),
+        ("fuzz", "fuzz"), ("ffuf", "ffuf"), ("takeover", "takeover"), ("bypass_403", "403-bypass"),
+        ("gitleaks", "gitleaks"), ("trufflehog", "trufflehog"), ("auto_scan", "auto-scan"),
     ):
         if getattr(a, flag, False):
             feats.append(label)
@@ -119,6 +119,12 @@ def print_phase(step: str, title: str) -> None:
     """Render a visual phase divider on a Rich terminal."""
     if _RICH and CONSOLE.is_terminal:
         CONSOLE.print(Rule(f"[bold {C_ACCENT}]{step}[/bold {C_ACCENT}] [dim]•[/dim] [bold]{title}[/bold]", style=C_ACCENT))
+
+
+def ui_event(tag: str, message: str, style: str = C_ACCENT) -> None:
+    """Render a live activity telemetry line on a Rich terminal (automatically stacks above active Progress bars)."""
+    if _RICH and CONSOLE.is_terminal:
+        CONSOLE.print(f"  [bold {style}][{tag:>10}][/bold {style}] {message}")
 
 
 def print_banner(a) -> None:
@@ -288,6 +294,289 @@ def print_tools_table(report: dict[str, dict]) -> None:
     CONSOLE.print(tab)
 
 
+INJECT_HUD_JS = """
+(info) => {
+    try {
+        document.querySelectorAll('form').forEach(f => {
+            f.style.outline = '2px dashed #ff2a85';
+            f.style.outlineOffset = '2px';
+        });
+        document.querySelectorAll('a[href*="?"]').forEach(a => {
+            a.style.outline = '1px solid #00f0ff';
+        });
+        const old = document.getElementById('__rf_hud');
+        if (old) old.remove();
+        const hud = document.createElement('div');
+        hud.id = '__rf_hud';
+        hud.style.cssText = [
+            'position:fixed', 'top:12px', 'right:12px', 'z-index:2147483647',
+            'width:360px', 'max-height:85vh', 'overflow:auto',
+            'background:rgba(10,14,23,0.93)', 'color:#e2e8f0',
+            'border:1px solid #00f0ff', 'border-radius:10px',
+            'box-shadow:0 8px 32px rgba(0,240,255,0.25)',
+            'font:12px/1.45 Consolas,Monaco,monospace', 'padding:12px 14px',
+            'backdrop-filter:blur(6px)', 'pointer-events:none'
+        ].join(';');
+        const jsList = (info.scripts || []).slice(0, 6).map(s => `<li style="color:#fde047;word-break:break-all">⚡ ${s}</li>`).join('');
+        const routeList = (info.routes || []).slice(0, 6).map(r => `<li style="color:#38bdf8;word-break:break-all">→ ${r}</li>`).join('');
+        hud.innerHTML = `
+            <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #1e293b;padding-bottom:6px;margin-bottom:8px">
+                <span style="color:#00f0ff;font-weight:bold;font-size:13px">⚡ ReconForge v2.0 Live HUD</span>
+                <span style="background:#ff2a85;color:#fff;padding:1px 7px;border-radius:99px;font-size:11px">Page ${info.idx}/${info.total}</span>
+            </div>
+            <div style="color:#94a3b8;font-size:11px;word-break:break-all;margin-bottom:8px">${info.url}</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;text-align:center;margin-bottom:8px">
+                <div style="background:#1e293b;padding:4px;border-radius:6px"><div style="color:#00f0ff;font-weight:bold">${info.dom_links}</div><div style="font-size:10px;color:#94a3b8">DOM Links</div></div>
+                <div style="background:#1e293b;padding:4px;border-radius:6px"><div style="color:#fde047;font-weight:bold">${info.js_count}</div><div style="font-size:10px;color:#94a3b8">JS Bundles</div></div>
+                <div style="background:#1e293b;padding:4px;border-radius:6px"><div style="color:#ff2a85;font-weight:bold">${info.forms}</div><div style="font-size:10px;color:#94a3b8">Forms</div></div>
+            </div>
+            ${jsList ? `<div style="font-size:11px;color:#cbd5e1;margin-top:4px"><b>JS Capturados:</b><ul style="margin:3px 0 0 14px;padding:0">${jsList}</ul></div>` : ''}
+            ${routeList ? `<div style="font-size:11px;color:#cbd5e1;margin-top:6px"><b>Top Rotas Descobertas:</b><ul style="margin:3px 0 0 14px;padding:0">${routeList}</ul></div>` : ''}
+        `;
+        document.body.appendChild(hud);
+    } catch (e) {}
+}
+"""
+
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>ReconForge v2.0 — Live Command Center</title>
+<style>
+  :root { --bg:#090d16; --panel:#111827; --border:#1f2937; --cyan:#00f0ff; --pink:#ff2a85; --green:#10b981; --yellow:#f59e0b; --text:#e2e8f0; --muted:#94a3b8; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui,-apple-system,sans-serif; padding:18px; }
+  header { display:flex; justify-content:space-between; align-items:center; background:var(--panel); border:1px solid var(--border); border-left:4px solid var(--cyan); padding:14px 20px; border-radius:10px; margin-bottom:16px; }
+  .brand { font-size:20px; font-weight:800; letter-spacing:0.5px; color:var(--cyan); }
+  .brand span { color:var(--pink); font-size:14px; margin-left:8px; }
+  .phase-badge { background:rgba(0,240,255,0.12); border:1px solid var(--cyan); color:var(--cyan); padding:6px 14px; border-radius:999px; font-weight:600; font-size:13px; }
+  .kpis { display:grid; grid-template-columns:repeat(6,1fr); gap:12px; margin-bottom:16px; }
+  .kpi { background:var(--panel); border:1px solid var(--border); padding:12px 14px; border-radius:10px; }
+  .kpi .val { font-size:24px; font-weight:800; color:var(--cyan); font-family:Consolas,monospace; }
+  .kpi .lbl { font-size:11px; color:var(--muted); text-transform:uppercase; margin-top:4px; }
+  .grid { display:grid; grid-template-columns:1.15fr 1fr; gap:16px; margin-bottom:16px; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px 16px; display:flex; flex-direction:column; max-height:430px; }
+  .card h2 { font-size:14px; text-transform:uppercase; letter-spacing:0.6px; color:var(--cyan); margin-bottom:10px; display:flex; justify-content:space-between; align-items:center; }
+  .scroll { overflow-y:auto; flex:1; padding-right:4px; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; font-family:Consolas,monospace; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border); word-break:break-all; }
+  th { color:var(--muted); font-size:11px; text-transform:uppercase; position:sticky; top:0; background:var(--panel); }
+  .tag { display:inline-block; padding:1px 6px; border-radius:4px; font-size:10.5px; margin-right:4px; background:rgba(255,42,133,0.18); color:#ff7ab8; border:1px solid rgba(255,42,133,0.4); }
+  .tag.ok { background:rgba(16,185,129,0.18); color:#34d399; border-color:rgba(16,185,129,0.4); }
+  .tag.warn { background:rgba(245,158,11,0.18); color:#fbbf24; border-color:rgba(245,158,11,0.4); }
+  .js-item { border:1px solid var(--border); border-radius:8px; padding:10px 12px; margin-bottom:8px; background:#0d1320; font-family:Consolas,monospace; font-size:12px; }
+  .js-item .js-hdr { display:flex; justify-content:space-between; color:var(--yellow); font-weight:bold; margin-bottom:6px; word-break:break-all; }
+  .js-routes { display:flex; flex-wrap:wrap; gap:5px; margin-top:4px; }
+  .js-route { background:#1e293b; color:#38bdf8; padding:2px 7px; border-radius:4px; font-size:11px; }
+  .viewport-box { text-align:center; flex:1; display:flex; flex-direction:column; justify-content:center; align-items:center; background:#070a12; border:1px dashed var(--border); border-radius:8px; overflow:hidden; position:relative; min-height:260px; }
+  .viewport-box img { max-width:100%; max-height:330px; object-fit:contain; }
+  .ev-line { font-family:Consolas,monospace; font-size:12px; padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.04); }
+  .ev-tag { color:var(--cyan); font-weight:bold; display:inline-block; width:95px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <div class="brand">⚡ RECONFORGE v2.0 <span>LIVE COMMAND CENTER</span></div>
+    <div style="font-size:12px;color:var(--muted);margin-top:3px" id="target-info">Carregando escopo...</div>
+  </div>
+  <div class="phase-badge" id="phase-badge">Inicializando...</div>
+</header>
+
+<div class="kpis">
+  <div class="kpi"><div class="val" id="k-subs">0</div><div class="lbl">Subdomínios</div></div>
+  <div class="kpi"><div class="val" id="k-urls">0</div><div class="lbl">URLs em Escopo</div></div>
+  <div class="kpi"><div class="val" id="k-alive" style="color:var(--green)">0</div><div class="lbl">Endpoints Vivos</div></div>
+  <div class="kpi"><div class="val" id="k-js" style="color:var(--yellow)">0</div><div class="lbl">Bundles JS / Maps</div></div>
+  <div class="kpi"><div class="val" id="k-findings" style="color:var(--pink)">0</div><div class="lbl">Findings & Secrets</div></div>
+  <div class="kpi"><div class="val" id="k-plan">0</div><div class="lbl">Rotas no Scan Plan</div></div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2><span>🎯 O Que Vem Pela Frente (Top Attack Surface)</span><span id="probes-info" style="font-size:11px;color:var(--muted)"></span></h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Score</th><th>HTTP</th><th>Categoria / Tags</th><th>Endpoint URL</th></tr></thead>
+        <tbody id="top-urls-body"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="card">
+    <h2><span>🖥️ Live Browser Render & DOM Inspector</span><span id="render-url" style="font-size:11px;color:var(--muted)"></span></h2>
+    <div class="viewport-box" id="viewport-box">
+      <div style="color:var(--muted);font-size:13px;padding:20px" id="viewport-placeholder">
+        Aguardando Fase 3 (Renderização Chromium / Playwright)...<br>
+        <span style="font-size:11px;color:#64748b">As páginas renderizadas e formulários destacados aparecerão ao vivo aqui.</span>
+      </div>
+      <img id="viewport-img" style="display:none" alt="Live Browser Render">
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2><span>📦 Dissecador de JavaScript & Sourcemaps (Ao Vivo)</span><span style="font-size:11px;color:var(--muted)">Rotas, fetch/axios & secrets extraídos</span></h2>
+    <div class="scroll" id="js-feed"></div>
+  </div>
+  <div class="card">
+    <h2><span>🧠 Intelligent Scan Planner & Candidatos</span><span style="font-size:11px;color:var(--muted)">Mapeamento de Scanners & Findings</span></h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Tipo / Classe</th><th>Params / Sinal</th><th>Tools / Status</th><th>Alvo</th></tr></thead>
+        <tbody id="plan-body"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="card" style="max-height:240px">
+  <h2><span>📡 Stream de Telemetria da Pipeline</span></h2>
+  <div class="scroll" id="event-feed"></div>
+</div>
+
+<script>
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function renderState(st) {
+  document.getElementById('target-info').textContent = `Alvo: ${st.scope} | Requests: ${st.requests}/${st.max_requests} | Probes: ${st.probed}/${st.max_probes}`;
+  document.getElementById('phase-badge').textContent = st.phase || 'Executando';
+  document.getElementById('k-subs').textContent = st.subdomains;
+  document.getElementById('k-urls').textContent = st.urls;
+  document.getElementById('k-alive').textContent = st.alive;
+  document.getElementById('k-js').textContent = st.js_count;
+  document.getElementById('k-findings').textContent = st.findings_total;
+  document.getElementById('k-plan').textContent = st.scan_plan_count;
+  document.getElementById('probes-info').textContent = `${st.alive} vivos de ${st.probed} testados`;
+
+  if (st.has_screenshot) {
+    document.getElementById('viewport-placeholder').style.display = 'none';
+    const img = document.getElementById('viewport-img');
+    img.style.display = 'block';
+    img.src = '/api/screenshot?t=' + st.screenshot_ts;
+    document.getElementById('render-url').textContent = st.latest_rendered_url || '';
+  }
+
+  document.getElementById('top-urls-body').innerHTML = (st.top_urls || []).map(r => `
+    <tr>
+      <td style="color:var(--green);font-weight:bold">${esc(r.priority)}</td>
+      <td><span class="tag ${r.status < 300 ? 'ok' : 'warn'}">${esc(r.status)}</span></td>
+      <td>${(r.tags || '').split(',').filter(Boolean).map(t => `<span class="tag">${esc(t)}</span>`).join('') || '<span style="color:var(--muted)">-</span>'}</td>
+      <td><a href="${esc(r.url)}" target="_blank" style="color:var(--text);text-decoration:none">${esc(r.url)}</a></td>
+    </tr>
+  `).join('') || '<tr><td colspan="4" style="color:var(--muted)">Descobrindo e pontuando endpoints...</td></tr>';
+
+  document.getElementById('js-feed').innerHTML = (st.js_intel || []).map(j => `
+    <div class="js-item">
+      <div class="js-hdr">
+        <span>⚡ ${esc(j.url)}</span>
+        <span style="color:var(--muted)">${esc(j.kb)} KB ${j.sourcemap ? '• <span class="tag">SOURCEMAP</span>' : ''} ${j.secrets ? `• <span class="tag" style="background:#ef4444;color:#fff">${j.secrets} SECRET</span>` : ''}</span>
+      </div>
+      <div style="color:var(--muted);font-size:11px">${j.routes.length} endpoints/referências extraídas:</div>
+      <div class="js-routes">${j.routes.slice(0, 14).map(rt => `<span class="js-route">${esc(rt)}</span>`).join('')}</div>
+    </div>
+  `).join('') || '<div style="color:var(--muted);font-size:12.5px">Nenhum arquivo JavaScript dissecado ainda...</div>';
+
+  const findingsRows = (st.findings || []).map(f => `
+    <tr>
+      <td><span class="tag">${esc(f.kind)}</span></td>
+      <td style="color:var(--yellow)">${esc(f.signal)}</td>
+      <td><span class="tag warn">CANDIDATE</span></td>
+      <td>${esc(f.target)}</td>
+    </tr>
+  `);
+  const planRows = (st.plan || []).map(p => `
+    <tr>
+      <td>${(p.classes || []).map(c => `<span class="tag">${esc(c)}</span>`).join('')}</td>
+      <td style="color:var(--yellow)">${esc((p.params || []).join(', '))}</td>
+      <td>${(p.suggested_tools || []).map(t => `<span class="tag ok">${esc(t)}</span>`).join('')}</td>
+      <td>${esc(p.url)}</td>
+    </tr>
+  `);
+  document.getElementById('plan-body').innerHTML = [...findingsRows, ...planRows].join('') || '<tr><td colspan="4" style="color:var(--muted)">Aguardando verificações de segurança e Scan Planner...</td></tr>';
+
+  document.getElementById('event-feed').innerHTML = (st.events || []).map(e => `
+    <div class="ev-line"><span style="color:var(--muted)">${esc(e.time)}</span> <span class="ev-tag">[${esc(e.tag)}]</span> ${esc(e.msg)}</div>
+  `).join('');
+}
+
+async function poll() {
+  if (window.__STATIC_STATE__) { renderState(window.__STATIC_STATE__); return; }
+  try {
+    const r = await fetch('/api/state', {cache:'no-store'});
+    if (r.ok) renderState(await r.json());
+  } catch (e) {}
+  setTimeout(poll, 800);
+}
+poll();
+</script>
+</body>
+</html>
+"""
+
+
+class VisualDashboard:
+    """Lightweight loopback-only (127.0.0.1) async HTTP server for the Live Command Center."""
+
+    def __init__(self, recon: "Recon"):
+        self.recon = recon
+        self.server: asyncio.AbstractServer | None = None
+        self.port: int = 0
+
+    async def start(self) -> str:
+        self.server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        sock = self.server.sockets[0]
+        self.port = sock.getsockname()[1]
+        url = f"http://127.0.0.1:{self.port}/"
+        ui_event("VISUAL-UI", f"Live Command Center ativo em [bold white]{url}[/bold white]", C_HOT)
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception:
+            pass
+        return url
+
+    async def stop(self) -> None:
+        if self.server:
+            self.server.close()
+            await self.server.wait_closed()
+            self.server = None
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            parts = line.decode("utf-8", "replace").split()
+            path = parts[1].split("?")[0] if len(parts) >= 2 else "/"
+            while True:
+                hdr = await asyncio.wait_for(reader.readline(), timeout=2.0)
+                if not hdr or hdr in (b"\r\n", b"\n"):
+                    break
+            if path == "/api/state":
+                body = json.dumps(self.recon.dashboard_state(), ensure_ascii=False).encode("utf-8")
+                ctype = "application/json; charset=utf-8"
+            elif path == "/api/screenshot" and self.recon.latest_screenshot:
+                body = self.recon.latest_screenshot
+                ctype = "image/png"
+            else:
+                body = DASHBOARD_HTML.encode("utf-8")
+                ctype = "text/html; charset=utf-8"
+            resp = (
+                f"HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\n"
+                f"Content-Length: {len(body)}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+            ).encode("ascii") + body
+            writer.write(resp)
+            await writer.drain()
+        except Exception:
+            pass
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+
+
 def parse_headers(specs) -> dict[str, str]:
     headers = {}
     for spec in specs or []:
@@ -422,6 +711,10 @@ HIGH_VALUE_PARAMS = re.compile(
 )
 UNSAFE_GET = re.compile(
     r"/(?:logout|log-out|signout|delete|remove|destroy|drop|truncate|purge|invalidate|terminate|shutdown|reboot)(?:[/?._-]|$)",
+    re.I,
+)
+ASSET_SKIP = re.compile(
+    r"\.(?:png|jpe?g|gif|webp|svg|woff2?|ttf|eot|ico|mp4|mov|avi|mp3|pdf|zip|rar|7z)(?:$|\?)",
     re.I,
 )
 DEFAULT_WORDS = [
@@ -1138,6 +1431,13 @@ class Recon:
         self.dns_ok: dict[str, bool] = {}
         self.probed = self.prior_probes
         self.js_saved: set[str] = set()
+        self.js_intel: list[dict] = []
+        self.live_events: list[dict] = []
+        self.current_phase: str = "Inicializando"
+        self.latest_screenshot: bytes = b""
+        self.screenshot_ts: int = 0
+        self.latest_rendered_url: str = ""
+        self.plan_items: list[dict] = []
         self.takeover_hits: list[dict] = []
         self.bypass_hits: list[dict] = []
         self.bola_findings: list[dict] = []
@@ -1145,6 +1445,58 @@ class Recon:
         self.origin_clients: dict[str, httpx.AsyncClient] = {}
         self.client = self.make_client()
         self.passive_client = self.make_client()
+
+    def record_event(self, tag: str, msg: str, style: str = C_ACCENT) -> None:
+        clean_msg = re.sub(r"\[/?[^\]]+\]", "", msg)
+        self.live_events.insert(0, {"time": time.strftime("%H:%M:%S"), "tag": tag, "msg": clean_msg})
+        if len(self.live_events) > 80:
+            self.live_events.pop()
+        ui_event(tag, msg, style)
+
+    def dashboard_state(self) -> dict:
+        try:
+            subs = self.store.count("hosts")
+            urls = self.store.count("urls")
+            alive = self.store.conn.execute("SELECT COUNT(*) FROM urls WHERE status BETWEEN 200 AND 399 AND source != 'soft404_control'").fetchone()[0]
+            secrets_n = self.store.count("secret_indicators")
+            top_rows = self.store.conn.execute(
+                "SELECT priority, status, tags, url FROM urls "
+                "WHERE status BETWEEN 200 AND 399 AND source != 'soft404_control' "
+                "ORDER BY priority DESC, url LIMIT 25"
+            ).fetchall()
+            top_urls = [{"priority": r[0], "status": r[1], "tags": r[2], "url": r[3]} for r in top_rows]
+        except Exception:
+            subs = urls = alive = secrets_n = 0
+            top_urls = []
+        findings = []
+        for t in self.takeover_hits:
+            findings.append({"kind": "TAKEOVER", "signal": t.get("service") or t.get("signal") or "", "target": t.get("host", "")})
+        for b in self.bypass_hits:
+            findings.append({"kind": "403-BYPASS", "signal": b.get("technique", ""), "target": b.get("url", "")})
+        for bo in self.bola_findings:
+            findings.append({"kind": "BOLA/IDOR", "signal": bo.get("type", ""), "target": bo.get("url", "")})
+        return {
+            "scope": self.scope.root,
+            "phase": self.current_phase,
+            "subdomains": subs,
+            "urls": urls,
+            "alive": alive,
+            "probed": self.probed,
+            "max_probes": self.a.max_probes,
+            "requests": self.gate.count,
+            "max_requests": self.a.max_requests,
+            "js_count": len(self.js_saved),
+            "findings_total": len(findings) + secrets_n,
+            "scan_plan_count": self.scan_plan_count,
+            "has_screenshot": bool(self.latest_screenshot),
+            "screenshot_ts": self.screenshot_ts,
+            "latest_rendered_url": self.latest_rendered_url,
+            "top_urls": top_urls,
+            "js_intel": self.js_intel[:30],
+            "findings": findings[:25],
+            "plan": self.plan_items[:30],
+            "events": self.live_events[:40],
+        }
 
     def make_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -1254,7 +1606,14 @@ class Recon:
                 proc = await asyncio.create_subprocess_exec(*argv, stdout=stdout, stderr=stderr,
                     **({"start_new_session": True} if os.name == "posix" else {}))
                 try:
-                    code = await asyncio.wait_for(proc.wait(), timeout=timeout or self.a.tool_timeout)
+                    if _RICH and CONSOLE.is_terminal and not getattr(CONSOLE, "_live", None):
+                        with CONSOLE.status(
+                            f"[bold {C_ACCENT}]Executando:[/bold {C_ACCENT}] [white]{name}[/white] [dim]({argv[0]})[/dim]...",
+                            spinner="dots",
+                        ):
+                            code = await asyncio.wait_for(proc.wait(), timeout=timeout or self.a.tool_timeout)
+                    else:
+                        code = await asyncio.wait_for(proc.wait(), timeout=timeout or self.a.tool_timeout)
                 except asyncio.TimeoutError:
                     await self.stop_process(proc)
                     details = "timeout"
@@ -1327,6 +1686,8 @@ class Recon:
     def ingest_lines(self, path: Path | None, source: str, kind: str = "url") -> None:
         if not path:
             return
+        hosts_before = self.store.count("hosts") if kind == "host" else 0
+        urls_before = self.store.url_count if kind != "host" else 0
         with path.open("r", encoding="utf-8", errors="replace") as f:
             for i, line in enumerate(f):
                 if i >= self.a.max_import_lines:
@@ -1339,9 +1700,18 @@ class Recon:
                 else:
                     self.put_url(raw, source)
         self.store.commit()
+        if kind == "host":
+            added = self.store.count("hosts") - hosts_before
+            ui_event("PASSIVE", f"[bold]{source}[/bold] -> [+{added} novos subdomínios] [dim](total: {self.store.count('hosts')})[/dim]", C_OK if added else "dim")
+        else:
+            added = self.store.url_count - urls_before
+            ui_event("DISCOVERY", f"[bold]{source}[/bold] -> [+{added} novas URLs em escopo] [dim](total: {self.store.url_count})[/dim]", C_OK if added else "dim")
 
     async def ct_provider(self, name: str, url: str, params: dict):
+        hosts_before = self.store.count("hosts")
         try:
+            if _RICH and CONSOLE.is_terminal and not getattr(CONSOLE, "_live", None):
+                ui_event("CT-LOG", f"Consultando Certificate Transparency em [bold]{name}[/bold]...", "dim")
             async with self.passive_client.stream("GET", url, params=params) as r:
                 if r.status_code != 200:
                     LOG.warning("%s HTTP %s", name, r.status_code)
@@ -1360,6 +1730,8 @@ class Recon:
                 for host in names:
                     self.put_host(str(host), name)
             self.store.commit()
+            added = self.store.count("hosts") - hosts_before
+            ui_event("CT-LOG", f"[bold]{name}[/bold] -> [+{added} subdomínios] [dim]({len(records)} certificados analisados)[/dim]", C_OK if added else "dim")
         except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
             LOG.warning("%s error: %s", name, type(exc).__name__)
 
@@ -1435,6 +1807,9 @@ class Recon:
         self.wildcard_dns = {"possible": possible, "answers": observations}
         if possible:
             LOG.warning("DNS wildcard suspected. Wordlist results need manual validation")
+            ui_event("DNS", "Wildcard DNS detectado! Subdomínios de wordlist exigem validação manual.", C_WARN)
+        else:
+            ui_event("DNS", "Wildcard DNS: negativo (respostas NXDOMAIN normais)", "dim")
 
     async def seed_hosts(self):
         await self.detect_dns_wildcard()
@@ -1445,12 +1820,17 @@ class Recon:
                 (self.scope.root, self.a.max_hosts),
             )
         ]
+        resolved_count = 0
 
         async def one(h):
+            nonlocal resolved_count
             if await self.resolves(h):
+                resolved_count += 1
                 self.put_url("https://" + h + "/", "resolved_host")
                 if self.a.http_too:
                     self.put_url("http://" + h + "/", "http_alternative")
+                if any(h.startswith(p) for p in ("api.", "admin.", "dev.", "staging.", "auth.", "sso.", "internal.", "vpn.", "portal.", "graphql.")):
+                    ui_event("DNS-HIT", f"Subdomínio de alto valor ativo: [bold white]{h}[/bold white]", C_HOT)
 
         # Controlled batch execution to prevent socket saturation
         chunk_size = max(1, self.a.dns_concurrency)
@@ -1473,6 +1853,7 @@ class Recon:
             for i in range(0, len(hosts), chunk_size):
                 await asyncio.gather(*(one(h) for h in hosts[i : i + chunk_size]))
         self.store.commit()
+        ui_event("DNS", f"Resolução concluída: [bold]{resolved_count}/{len(hosts)}[/bold] subdomínios com IP público válido", C_OK if resolved_count else C_WARN)
 
     def analyze_js(self, url: str, body: str):
         if url in self.js_saved:
@@ -1481,23 +1862,48 @@ class Recon:
         digest = hashlib.sha256(url.encode()).hexdigest()[:20]
         target = self.js_dir / f"{digest}.js"
         target.write_text(body, encoding="utf8")
+        extracted_routes: list[str] = []
         for match in URL_REGEX.finditer(body):
             raw = match.group("url")
             if "${" not in raw and not raw.startswith("//"):
                 self.put_url(raw, "js_static", url)
+                if raw not in extracted_routes and not ASSET_SKIP.search(raw):
+                    extracted_routes.append(raw)
         for match in JS_RELATIVE.finditer(body):
             raw = match.group(1)
             if raw.startswith(("http://", "https://", "/")):
                 self.put_url(raw, "js_call", url)
+                if raw not in extracted_routes:
+                    extracted_routes.append(raw)
             elif not raw.startswith((".", "?", "#")) and not re.match(r"[\w-]+\.[\w-]+$", raw):
                 root = urlsplit(url)
-                self.put_url(f"{root.scheme}://{root.netloc}/" + raw.lstrip("/"), "js_call")
+                full = f"{root.scheme}://{root.netloc}/" + raw.lstrip("/")
+                self.put_url(full, "js_call")
+                if "/" + raw.lstrip("/") not in extracted_routes:
+                    extracted_routes.append("/" + raw.lstrip("/"))
         sm = SOURCEMAP.search(body)
         if sm:
             self.put_url(sm.group(1), "source_map", url)
+        secret_hits = 0
         for kind, rx in SECRET_PATTERNS.items():
             for match in rx.finditer(body):
-                self.store.secret(kind, match.group(), url, body.count("\n", 0, match.start()) + 1)
+                line_no = body.count("\n", 0, match.start()) + 1
+                self.store.secret(kind, match.group(), url, line_no)
+                secret_hits += 1
+                self.record_event("SECRET", f"Possível [bold]{kind}[/bold] em {url}:{line_no}", "bright_red")
+        kb = round(len(body) / 1024, 1)
+        self.js_intel.insert(0, {
+            "url": url,
+            "kb": kb,
+            "routes": extracted_routes[:25],
+            "sourcemap": bool(sm),
+            "secrets": secret_hits,
+        })
+        if extracted_routes or sm or secret_hits:
+            preview = ", ".join(extracted_routes[:3])
+            extra = f" -> [cyan]{preview}[/cyan]" if preview else ""
+            sm_badge = " [bold magenta][+SOURCEMAP][/bold magenta]" if sm else ""
+            self.record_event("JS", f"[bold]{urlsplit(url).path.rsplit('/', 1)[-1] or url}[/bold] ({kb} KB): +{len(extracted_routes)} rotas{sm_badge}{extra}", C_WARN)
 
     def extract(self, url: str, content_type: str, payload: bytes):
         ct = content_type.lower()
@@ -1508,9 +1914,14 @@ class Recon:
         if path.endswith(".map") or "sourcemap" in ct:
             try:
                 data = json.loads(payload)
-                for i, source in enumerate(data.get("sourcesContent", [])[:60]):
+                sources = data.get("sourcesContent", [])[:60]
+                count = 0
+                for i, source in enumerate(sources):
                     if isinstance(source, str):
+                        count += 1
                         self.analyze_js(f"{url}#source{i}", source[: self.a.max_body])
+                if count:
+                    self.record_event("SOURCEMAP", f"[bold]{url}[/bold] -> {count} arquivos-fonte originais reconstruídos!", C_HOT)
             except (json.JSONDecodeError, ValueError, TypeError):
                 pass
             return
@@ -1528,21 +1939,31 @@ class Recon:
                         url,
                         probe=form["method"] == "GET",
                     )
+                    if form["method"] != "GET":
+                        self.record_event("FORM-POST", f"Form {form['method']} isolado p/ revisão: [bold]{form['action']}[/bold] (em {url})", C_WARN)
             return
         if path.endswith("robots.txt"):
             txt = payload.decode("utf-8", "replace")
+            count = 0
             for line in txt.splitlines():
                 m = re.match(r"\s*(?:Sitemap|Disallow|Allow)\s*:\s*(\S+)", line, re.I)
                 if m and m.group(1) != "/":
                     self.put_url(m.group(1), "robots", url)
+                    count += 1
+            if count:
+                self.record_event("ROBOTS", f"{url} -> +{count} diretivas extraídas", C_OK)
             return
         if "xml" in ct or path.endswith(".xml"):
             try:
                 root = ET.fromstring(payload)
+                count = 0
                 for el in root.iter():
                     if el.tag.endswith("}loc") or el.tag == "loc":
                         if el.text:
                             self.put_url(el.text, "sitemap", url)
+                            count += 1
+                if count:
+                    self.record_event("SITEMAP", f"{url} -> +{count} URLs extraídas", C_OK)
             except ET.ParseError:
                 pass
             return
@@ -1552,12 +1973,13 @@ class Recon:
                 # Parse OpenAPI / Swagger endpoints
                 if isinstance(data, dict):
                     paths = data.get("paths", {})
-                    if isinstance(paths, dict):
+                    if isinstance(paths, dict) and paths:
                         for endpoint in paths.keys():
                             if isinstance(endpoint, str) and endpoint.startswith("/"):
                                 methods = paths[endpoint]
                                 gettable = isinstance(methods, dict) and any(k.lower() in {"get", "head"} for k in methods)
                                 self.put_url(endpoint, "openapi_path", url, probe=gettable)
+                        self.record_event("OPENAPI", f"Schema de API em [bold]{url}[/bold] -> +{len(paths)} endpoints mapeados!", C_HOT)
                 # Scan for URLs in strings
                 text = payload.decode("utf-8", "replace")
                 for match in URL_REGEX.finditer(text):
@@ -1823,18 +2245,30 @@ class Recon:
         pages = [
             r[0]
             for r in self.store.conn.execute(
-                "SELECT url FROM urls WHERE status=200 AND content_type LIKE '%html%' LIMIT ?",
+                "SELECT url FROM urls WHERE status=200 AND content_type LIKE '%html%' ORDER BY priority DESC LIMIT ?",
                 (self.a.max_pages,),
             )
         ]
+        if not pages:
+            return
+        headed = bool(getattr(self.a, "headed", False) or getattr(self.a, "visual", False))
+        shots_dir = self.out / "screenshots"
+        if headed:
+            shots_dir.mkdir(exist_ok=True)
         async with async_playwright() as p:
-            browser = await p.chromium.launch(args=["--force-webrtc-ip-handling-policy=disable_non_proxied_udp"])
+            launch_args = ["--force-webrtc-ip-handling-policy=disable_non_proxied_udp"]
+            if headed:
+                launch_args.append("--window-size=1400,900")
+            browser = await p.chromium.launch(headless=not headed, args=launch_args)
             try:
-                for url in pages:
+                for idx, url in enumerate(pages, 1):
                     if self.gate.count >= self.a.max_requests:
                         break
                     context = await browser.new_context(
-                        user_agent=self.a.user_agent, service_workers="block", accept_downloads=False
+                        user_agent=self.a.user_agent,
+                        service_workers="block",
+                        accept_downloads=False,
+                        viewport={"width": 1366, "height": 820} if headed else None,
                     )
                     page = await context.new_page()
                     if not hasattr(context, "route_web_socket"):
@@ -1853,8 +2287,10 @@ class Recon:
                         await page.wait_for_timeout(min(self.a.render_wait, 5) * 1000)
                         links = await page.eval_on_selector_all(
                             "a[href],script[src],form[action]",
-                            "els => els.map(e => ({url: e.href || e.src || e.action, method: e.tagName === 'FORM' ? (e.method || 'GET') : 'GET'})).filter(x => x.url)",
+                            "els => els.map(e => ({url: e.href || e.src || e.action, tag: e.tagName, method: e.tagName === 'FORM' ? (e.method || 'GET') : 'GET'})).filter(x => x.url)",
                         )
+                        scripts_found = []
+                        forms_count = 0
                         for item in links:
                             self.put_url(
                                 item["url"],
@@ -1862,6 +2298,37 @@ class Recon:
                                 page.url,
                                 probe=item["method"].upper() == "GET",
                             )
+                            if item.get("tag") == "SCRIPT":
+                                scripts_found.append(urlsplit(item["url"]).path.rsplit("/", 1)[-1] or item["url"])
+                            elif item.get("tag") == "FORM":
+                                forms_count += 1
+                        self.record_event(
+                            "BROWSER",
+                            f"Renderizado [{idx}/{len(pages)}] [bold]{url}[/bold] -> +{len(links)} elementos DOM ({len(scripts_found)} JS, {forms_count} forms)",
+                            C_ACCENT,
+                        )
+                        if headed:
+                            hud_data = {
+                                "idx": idx,
+                                "total": len(pages),
+                                "url": url,
+                                "dom_links": len(links),
+                                "js_count": len(self.js_saved),
+                                "forms": forms_count,
+                                "scripts": scripts_found[:8],
+                                "routes": [r for j in self.js_intel[:3] for r in j.get("routes", [])][:8],
+                            }
+                            try:
+                                await page.evaluate(INJECT_HUD_JS, hud_data)
+                                await page.wait_for_timeout(600)
+                                shot = await page.screenshot(type="png")
+                                self.latest_screenshot = shot
+                                self.screenshot_ts = int(time.time() * 1000)
+                                self.latest_rendered_url = url
+                                (shots_dir / f"page_{idx:03d}.png").write_bytes(shot)
+                                (shots_dir / "latest.png").write_bytes(shot)
+                            except Exception:
+                                pass
                     except Exception as exc:
                         LOG.debug("browser %s: %s", url, type(exc).__name__)
                     finally:
@@ -2229,6 +2696,14 @@ class Recon:
             "note": "Candidates are not confirmed vulnerabilities; tool findings require manual verification.",
         }
         atomic_text(self.out / "summary.json", json.dumps(summary, indent=2, ensure_ascii=False))
+        # Always write a standalone interactive visual HTML report in the output folder
+        static_state = json.dumps(self.dashboard_state(), ensure_ascii=False)
+        static_html = DASHBOARD_HTML.replace(
+            "<script>",
+            f"<script>window.__STATIC_STATE__ = {static_state};\n",
+            1,
+        )
+        atomic_text(self.out / "dashboard.html", static_html)
         if _RICH and CONSOLE.is_terminal:
             top_urls = self.store.conn.execute(
                 "SELECT priority, status, tags, source, url FROM urls "
@@ -2384,6 +2859,7 @@ class Recon:
                 if t in EXECUTABLE_SCAN_TOOLS:
                     tool_targets[t].append(target)
         self.scan_plan_count = len(plan)
+        self.plan_items = list(plan)
         scan_dir = self.out / "scanners"
         scan_dir.mkdir(exist_ok=True)
         atomic_text(self.out / "scan_plan.json", "".join(json.dumps(x, ensure_ascii=False) + "\n" for x in plan))
@@ -2484,14 +2960,20 @@ class Recon:
         existing = self.out / "run_config.json"
         if not existing.exists():
             atomic_text(existing, json.dumps(self.scope_config(), indent=2))
+        dashboard = VisualDashboard(self) if getattr(self.a, "visual", False) else None
+        if dashboard:
+            await dashboard.start()
         try:
+            self.current_phase = "Fase 1 • Descoberta Passiva & DNS"
             print_phase("Fase 1", "Descoberta Passiva & DNS Enumeration")
             await self.passive()
             if self.a.passive_only:
                 return
+            self.current_phase = "Fase 2 • Resolução DNS & Probing Inicial"
             print_phase("Fase 2", "Resolução DNS, Pinning & Probing Inicial")
             await self.seed_hosts()
             await self.drain(min(self.a.max_probes, self.a.initial_probes))
+            self.current_phase = "Fase 3 • Crawling, Extração JS & Renderização"
             print_phase("Fase 3", "Crawling Profundo, Extração JS & Renderização")
             await self.crawl_katana()
             discovery_cap = (
@@ -2503,21 +2985,29 @@ class Recon:
             await self.browser()
             await self.drain(discovery_cap)
             if self.a.fuzz or self.a.ffuf:
+                self.current_phase = "Fase 4 • Fuzzing & Calibração Soft-404"
                 print_phase("Fase 4", "Fuzzing Contextual & Calibração Soft-404")
             await self.wordlist_fuzz()
             await self.ffuf()
             await self.drain(self.a.max_probes)
+            self.current_phase = "Fase 5 • Verificações (Takeover, 403, BOLA, Secrets)"
             print_phase("Fase 5", "Verificações de Segurança (Takeover, 403 Bypass, BOLA, Secrets)")
             await self.takeover()
             await self.bypass_403()
             await self.bola()
             await self.offline_secrets()
+            self.current_phase = "Fase 6 • Scan Planner & Scanners"
             print_phase("Fase 6", "Scan Planner & Scanners Direcionados")
             await self.scanners()
             await self.plan_scans()
         finally:
+            self.current_phase = "Concluído • Relatório & Dashboard Gerados"
             print_phase("Fase 7", "Exportação de Artefatos & Relatório Final")
             self.export()
+            if dashboard:
+                await asyncio.sleep(1.2)
+                await dashboard.stop()
+                ui_event("VISUAL-UI", f"Dashboard estático salvo em: [bold white]{self.out / 'dashboard.html'}[/bold white]", C_OK)
 
 
 def build_parser():
@@ -2567,6 +3057,8 @@ def build_parser():
     p.add_argument("--crawl-depth", type=int, default=3)
     p.add_argument("--max-crawl-hosts", type=int, default=100)
     p.add_argument("--browser", action="store_true")
+    p.add_argument("--headed", action="store_true", help="open visible Chromium window with live ReconForge Cyber HUD during page rendering")
+    p.add_argument("--visual", action="store_true", help="launch Live Command Center GUI in browser + visible headed Playwright rendering with DOM/JS HUD")
     p.add_argument("--max-pages", type=int, default=20)
     p.add_argument("--render-wait", type=float, default=2.0)
     p.add_argument("--fuzz", action="store_true", help="budgeted HTTP wordlist fuzzing")
@@ -2629,6 +3121,11 @@ def main():
         a.domain = hostnorm(a.domain)
     except (ValueError, UnicodeError) as exc:
         raise SystemExit(f"Invalid domain: {exc}") from exc
+    if a.visual:
+        a.headed = True
+        a.browser = True
+    elif a.headed:
+        a.browser = True
     if a.auto_install is None:
         a.auto_install = True
     if a.auto_install:

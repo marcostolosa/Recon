@@ -196,7 +196,8 @@ Tudo fica organizado no diretório `--out`:
 
 | Arquivo | Conteúdo |
 | :--- | :--- |
-| `summary.json` | Resumo executivo da execução (contagens, métricas, status de wildcard DNS). |
+| `summary.json` / `dashboard.html` | Resumo executivo JSON e **Dashboard Visual Interativo** completo pós-scan. |
+| `screenshots/*.png` | Capturas das páginas renderizadas com o **ReconForge Cyber HUD** (`--headed` / `--visual`). |
 | `priority.csv` | Ranking completo de URLs por score de risco, status, tags e flag `likely_soft404`. |
 | `subdomains.txt` / `alive.txt` | Subdomínios in-scope e URLs vivas (`2xx`/`3xx`) ordenadas por prioridade. |
 | `parameterized.txt` | Endpoints vivos com query string prontos para análise de injeção. |
@@ -221,6 +222,8 @@ Tudo fica organizado no diretório `--out`:
 | `--passive-only` | `False` | Executa apenas enumeração passiva sem tocar no alvo. |
 | `--katana` / `--jsluice` | `False` | Ativa crawling profundo com Katana (e extração JSLuice opcional). |
 | `--browser` | `False` | Renderiza páginas em Chromium headless (Playwright) com interceptação de escopo. |
+| `--headed` | `False` | Abre a janela visível do Chromium com o **Cyber HUD** destacando forms, links e JS na tela. |
+| `--visual` | `False` | Abre o **Live Command Center GUI** no navegador + janela visível do Chromium em tempo real. |
 | `--fuzz` / `--ffuf` | `False` | Ativa fuzzing de diretórios/rotas com calibração automática de Soft-404. |
 | `--takeover` / `--bypass-403` | `True` / `False` | Ativa verificação de Subdomain Takeover e Bypass de 403/401. |
 | `--identity` | `[]` | Identidade para matriz BOLA/IDOR no formato `"Label:Header: Valor"`. |
