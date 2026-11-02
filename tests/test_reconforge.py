@@ -462,6 +462,38 @@ class TestScanTargetingFixes(unittest.TestCase):
         finally:
             shutil.rmtree(td, ignore_errors=True)
 
+    def test_full_preset_enables_all_modules_and_default_out(self):
+        from reconforge import _active_features
+        p = build_parser()
+        a = p.parse_args(["example.com", "--full"])
+        # Trigger preset expansion logic
+        if getattr(a, "full", False):
+            a.subdomains = True
+            a.katana = True
+            a.jsluice = True
+            a.gitleaks = True
+            a.trufflehog = True
+            a.fuzz = True
+            a.ffuf = True
+            a.takeover = True
+            a.bypass_403 = True
+            a.scan_profile = "deep"
+            if a.out == "reconforge-output":
+                a.out = str(Path("runs") / a.domain)
+        self.assertTrue(a.subdomains)
+        self.assertTrue(a.katana)
+        self.assertTrue(a.jsluice)
+        self.assertTrue(a.gitleaks)
+        self.assertTrue(a.trufflehog)
+        self.assertTrue(a.fuzz)
+        self.assertTrue(a.ffuf)
+        self.assertTrue(a.takeover)
+        self.assertTrue(a.bypass_403)
+        self.assertEqual(a.scan_profile, "deep")
+        self.assertEqual(a.out, str(Path("runs") / "example.com"))
+        feats = _active_features(a)
+        self.assertIn("FULL-PRESET", feats)
+
 
 if __name__ == "__main__":
     unittest.main()

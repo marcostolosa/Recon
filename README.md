@@ -14,7 +14,7 @@
 **Scoped, Resumable & Findings-Oriented Bug Bounty Reconnaissance Engine**
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![Tests 61 Passed](https://img.shields.io/badge/Tests-61%20Passed-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](#-testes--auditoria)
+[![Tests 63 Passed](https://img.shields.io/badge/Tests-63%20Passed-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](#-testes--auditoria)
 [![Engine AsyncIO + SQLite WAL](https://img.shields.io/badge/Engine-AsyncIO%20%2B%20SQLite%20WAL-8A2BE2?style=for-the-badge&logo=sqlite&logoColor=white)](#-under-the-hood-para-os-nerds)
 [![Security DNS Pinned](https://img.shields.io/badge/Security-DNS%20Pinned%20%26%20GET--Safe-E63946?style=for-the-badge&logo=cloudflare&logoColor=white)](#-under-the-hood-para-os-nerds)
 [![UI Rich TUI](https://img.shields.io/badge/TUI-Rich%20Powered-00B4D8?style=for-the-badge&logo=windowsterminal&logoColor=white)](#-interface-visual-rich-tui)
@@ -95,6 +95,16 @@ Quando executado no terminal, o ReconForge exibe divisores por fase, barras de p
 ---
 
 ## 🧪 Receitas Prontas (Copy & Paste)
+
+### 0. Recon Completo "Turnkey" em 1 Comando (`--full`) 🔥
+Ativa toda a esteira profunda de uma só vez (`--subdomains`, Katana, JSLuice, Gitleaks, Trufflehog, Ffuf, Takeover, 403-Bypass, profile `deep`, orçamentos ampliados e saída automática em `runs/<domain>`):
+```bash
+# Modo terminal interativo
+python reconforge.py example.com --full
+
+# Modo com Command Center GUI no navegador + navegador visual renderizando com Cyber HUD
+python reconforge.py example.com --full --visual
+```
 
 ### 1. Recon Passivo (Zero Tráfego no Alvo)
 Coleta apenas via Certificate Transparency (`crt.sh`, `CertSpotter`), `subfinder`, `amass` e histórico (`gau`/Wayback):
@@ -216,6 +226,9 @@ Tudo fica organizado no diretório `--out`:
 | Flag | Padrão | Descrição |
 | :--- | :--- | :--- |
 | `domain` | — | Domínio raiz autorizado (ex: `example.com`). |
+| `--full` / `--all` | `False` | **Preset Turnkey Completo:** Ativa subdomínios, Katana, JSLuice, Gitleaks, Trufflehog, Fuzzing/Ffuf, Takeover, 403-Bypass, profile `deep` e direciona `--out` para `runs/<domain>`. |
+| `--visual` / `--gui` | `False` | Abre o **Live Command Center GUI** no navegador + janela visível do Chromium com HUD em tempo real. |
+| `--auto-scan` / `--scan` | `False` | Executa automaticamente as ferramentas propostas no Scan Planner (`sqlmap`, `ghauri`, `commix`, `dalfox`, `nuclei`). |
 | `--subdomains` | `False` | Inclui `*.domain` no escopo permitido. |
 | `--exclude` / `--exclude-path` | `[]` | Exclui hostnames (e subdomínios) ou prefixos de path. |
 | `--check-tools` / `--install-tools` | `False` | Exibe tabela de status das ferramentas ou instala todas automaticamente. |
@@ -223,11 +236,9 @@ Tudo fica organizado no diretório `--out`:
 | `--katana` / `--jsluice` | `False` | Ativa crawling profundo com Katana (e extração JSLuice opcional). |
 | `--browser` | `False` | Renderiza páginas em Chromium headless (Playwright) com interceptação de escopo. |
 | `--headed` | `False` | Abre a janela visível do Chromium com o **Cyber HUD** destacando forms, links e JS na tela. |
-| `--visual` | `False` | Abre o **Live Command Center GUI** no navegador + janela visível do Chromium em tempo real. |
 | `--fuzz` / `--ffuf` | `False` | Ativa fuzzing de diretórios/rotas com calibração automática de Soft-404. |
 | `--takeover` / `--bypass-403` | `True` / `False` | Ativa verificação de Subdomain Takeover e Bypass de 403/401. |
 | `--identity` | `[]` | Identidade para matriz BOLA/IDOR no formato `"Label:Header: Valor"`. |
-| `--auto-scan` | `False` | Executa automaticamente as ferramentas propostas no Scan Planner. |
 | `--scan-profile` | `fast` | Profundidade dos scanners: `safe` (leve), `fast` (padrão) ou `deep` (máximo). |
 | `--rate` / `--concurrency` | `3.0` / `5` | Requisições por segundo e workers simultâneos. |
 | `--max-probes` / `--max-requests` | `4000` / `6000` | Orçamento cumulativo máximo de URLs testadas e requests HTTP totais. |
@@ -236,7 +247,7 @@ Tudo fica organizado no diretório `--out`:
 
 ## ✅ Testes & Auditoria
 
-A suíte conta com **61 testes automatizados** cobrindo escopo, normalização, DNS pinning, isolamento de credenciais, BOLA, takeover, 403 bypass, deduplicação do Scan Planner e componentes visuais:
+A suíte conta com **63 testes automatizados** cobrindo escopo, normalização, DNS pinning, isolamento de credenciais, BOLA, takeover, 403 bypass, deduplicação do Scan Planner e componentes visuais:
 
 ```bash
 python -m unittest discover -s tests -v

@@ -100,6 +100,8 @@ def setup_logging(level: int = logging.INFO) -> None:
 
 def _active_features(a) -> list[str]:
     feats = []
+    if getattr(a, "full", False):
+        feats.append("FULL-PRESET")
     for flag, label in (
         ("ct", "CT"), ("subfinder", "subfinder"), ("amass", "amass"), ("gau", "gau"),
         ("katana", "katana"), ("browser", "browser"), ("headed", "headed"), ("visual", "visual-gui"),
@@ -3045,6 +3047,8 @@ class Recon:
 def build_parser():
     p = argparse.ArgumentParser(description="Scoped and resumable reconnaissance with optional active scanners")
     p.add_argument("domain", nargs="?", help="authorized apex hostname, without scheme")
+    p.add_argument("--full", "--all", dest="full", action="store_true",
+                   help="turnkey deep recon preset: enables --subdomains, --katana, --jsluice, --gitleaks, --trufflehog, --fuzz, --ffuf, --takeover, --bypass-403, and --scan-profile deep (defaults --out to runs/<domain>)")
     p.add_argument("--check-tools", action="store_true", help="check installed external tools and Python packages")
     p.add_argument("--install-tools", action="store_true", help="check and install missing external tools and Python packages")
     p.add_argument("--auto-install", action="store_true", default=None, help="automatically check and install missing tools needed for the active flags (default: enabled on CLI)")
@@ -3090,7 +3094,7 @@ def build_parser():
     p.add_argument("--max-crawl-hosts", type=int, default=100)
     p.add_argument("--browser", action="store_true")
     p.add_argument("--headed", action="store_true", help="open visible Chromium window with live ReconForge Cyber HUD during page rendering")
-    p.add_argument("--visual", action="store_true", help="launch Live Command Center GUI in browser + visible headed Playwright rendering with DOM/JS HUD")
+    p.add_argument("--visual", "--gui", dest="visual", action="store_true", help="launch Live Command Center GUI in browser + visible headed Playwright rendering with DOM/JS HUD")
     p.add_argument("--max-pages", type=int, default=20)
     p.add_argument("--render-wait", type=float, default=2.0)
     p.add_argument("--fuzz", action="store_true", help="budgeted HTTP wordlist fuzzing")
@@ -3121,7 +3125,7 @@ def build_parser():
         choices=["sqlmap", "ghauri", "commix", "dalfox", "nuclei"],
         help="restrict which tools the scan planner proposes (default: all routed tools)",
     )
-    p.add_argument("--auto-scan", action="store_true", help="execute the routed scan plan (sqlmap/ghauri/commix/dalfox in PATH); default is propose-only")
+    p.add_argument("--auto-scan", "--scan", dest="auto_scan", action="store_true", help="execute the routed scan plan (sqlmap/ghauri/commix/dalfox in PATH); default is propose-only")
     p.add_argument("--scan-plan-limit", type=int, default=50, help="max parameterized endpoints to route in the scan plan")
     p.add_argument(
         "--scan-profile",
@@ -3153,6 +3157,25 @@ def main():
         a.domain = hostnorm(a.domain)
     except (ValueError, UnicodeError) as exc:
         raise SystemExit(f"Invalid domain: {exc}") from exc
+    if getattr(a, "full", False):
+        a.subdomains = True
+        a.subfinder_all = True
+        a.katana = True
+        a.jsluice = True
+        a.gitleaks = True
+        a.trufflehog = True
+        a.fuzz = True
+        a.ffuf = True
+        a.takeover = True
+        a.bypass_403 = True
+        a.scan_profile = "deep"
+        if a.max_probes == 4000:
+            a.max_probes = 5000
+        if a.max_requests == 6000:
+            a.max_requests = 8000
+        if a.out == "reconforge-output":
+            clean_name = re.sub(r"[^\w.-]", "_", a.domain)
+            a.out = str(Path("runs") / clean_name)
     if a.visual:
         a.headed = True
         a.browser = True
