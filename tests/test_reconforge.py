@@ -44,7 +44,7 @@ class TestReconForge(unittest.TestCase):
     def test_03_scope_url_normalization(self):
         scope = Scope("example.com", include_subdomains=True, excludes=[])
         normalized = scope.url("https://API.Example.com:443/v1/users?b=2&a=1#fragment")
-        self.assertEqual(normalized, "https://api.example.com/v1/users?a=1&b=2")
+        self.assertEqual(normalized, "https://api.example.com/v1/users?b=2&a=1")
 
         relative = scope.url("/api/data", base="https://example.com/login")
         self.assertEqual(relative, "https://example.com/api/data")
@@ -206,9 +206,9 @@ class TestReconForge(unittest.TestCase):
             recon = Recon(args)
             identities = recon.parse_identities()
             self.assertEqual(set(identities), {"A", "B"})
-            self.assertEqual(identities["A"]["Authorization"], "Bearer tokA")
-            self.assertEqual(identities["A"]["X-Trace"], "1")
-            self.assertEqual(identities["B"]["Authorization"], "Bearer tokB")
+            self.assertEqual(identities["A"]["authorization"], "Bearer tokA")
+            self.assertEqual(identities["A"]["x-trace"], "1")
+            self.assertEqual(identities["B"]["authorization"], "Bearer tokB")
             recon.store.conn.close()
 
     def test_14_takeover_fingerprint_matches(self):
@@ -223,9 +223,9 @@ class TestReconForge(unittest.TestCase):
             import reconforge
             parser = reconforge.build_parser()
             args = parser.parse_args(["example.com", "--out", td, "--max-body", "999000000"])
-            # replicate main()'s clamp
-            args.max_body = max(1, min(args.max_body, 20_000_000))
+            recon = Recon(args)
             self.assertEqual(args.max_body, 20_000_000)
+            asyncio.run(recon.aclose())
 
     def test_16_classify_url_routes_injection_tools(self):
         with tempfile.TemporaryDirectory() as td:
@@ -249,7 +249,8 @@ class TestReconForge(unittest.TestCase):
             argv = deep._scan_argv("sqlmap", "https://example.com/a?id=1", scan_dir)
             self.assertIn("--level=5", argv)
             self.assertIn("--risk=3", argv)
-            self.assertIn("--random-agent", argv)
+            self.assertNotIn("--random-agent", argv)
+            self.assertIn("--ignore-redirects", argv)
             deep.store.conn.close()
             safe = Recon(build_parser().parse_args(["example.com", "--out", td, "--scan-profile", "safe"]))
             argv = safe._scan_argv("sqlmap", "https://example.com/a?id=1", scan_dir)

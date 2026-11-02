@@ -1,6 +1,6 @@
 # Python dependencies for ReconForge v2
-httpx>=0.24.0
-playwright>=1.40.0
+httpx>=0.28.1,<1
+playwright>=1.48.0
 # Optional: enables CNAME / NXDOMAIN signals in the subdomain-takeover pass.
 # Without it, takeover detection falls back to HTTP body fingerprints only.
 dnspython>=2.4.0

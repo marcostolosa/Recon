@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import AsyncExitStack, contextmanager
 from collections import defaultdict
 import csv
 import hashlib
@@ -16,6 +17,7 @@ import ipaddress
 import json
 import logging
 import os
+import posixpath
 from pathlib import Path
 import re
 import secrets
@@ -24,12 +26,121 @@ import shutil
 import socket
 import sqlite3
 import time
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urljoin, urlsplit, urlunsplit
 import xml.etree.ElementTree as ET
 
 import httpx
 
 LOG = logging.getLogger("reconforge")
+PUBLIC_HEADERS = {"user-agent", "x-bug-bounty", "contact"}
+
+
+def parse_headers(specs) -> dict[str, str]:
+    headers = {}
+    for spec in specs or []:
+        key, sep, value = spec.partition(":")
+        key, value = key.strip(), value.strip()
+        if (not sep or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key)
+                or any(ord(c) < 32 or ord(c) == 127 for c in value)
+                or key.lower() in {"host", "content-length", "transfer-encoding", "connection"}):
+            raise ValueError("Invalid custom header (name, value or transport header)")
+        headers[key.lower()] = value
+    return headers
+
+
+def path_variants(path: str) -> set[str]:
+    """Conservative policy views; never rewrite the actual request path."""
+    variants = set()
+    for _ in range(6):
+        path = path.replace("\\", "/")
+        variants.add(path)
+        variants.add(posixpath.normpath("/" + path.lstrip("/")))
+        without_parameters = "/".join(segment.split(";", 1)[0] for segment in path.split("/"))
+        variants.add(posixpath.normpath("/" + without_parameters.lstrip("/")))
+        decoded = unquote(path)
+        if decoded == path:
+            break
+        path = decoded
+    else:
+        # Excessive nested encoding cannot be authorized reliably.
+        variants.add("/logout")
+    return variants
+
+
+class RunLock:
+    """OS-released advisory lock; a crashed process cannot leave a stale lock."""
+    def __init__(self, path: Path):
+        self.path = path
+        self.file = None
+
+    def __enter__(self):
+        self.file = self.path.open("a+b")
+        try:
+            if self.path.stat().st_size == 0:
+                self.file.write(b"0")
+                self.file.flush()
+            self.file.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(self.file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            self.file.close()
+            raise ValueError("output folder is already in use") from exc
+        return self
+
+    def __exit__(self, *args):
+        self.file.close()
+
+
+def atomic_text(path: Path, text: str) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(text, encoding="utf8")
+    temporary.replace(path)
+
+
+@contextmanager
+def atomic_open(path: Path, **kwargs):
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf8", **kwargs) as stream:
+        yield stream
+    temporary.replace(path)
+
+
+class PinnedTransport(httpx.AsyncBaseTransport):
+    """Resolve, validate and connect to the same IP, preserving Host and TLS SNI."""
+    def __init__(self, *, allow_private: bool, timeout: float, concurrency: int):
+        self.allow_private = allow_private
+        self.timeout = timeout
+        self.concurrency = concurrency
+        self.transports = {}
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        try:
+            records = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(
+                request.url.host, request.url.port, type=socket.SOCK_STREAM), self.timeout)
+            ips = list(dict.fromkeys(row[4][0] for row in records))
+            if not ips or (not self.allow_private and any(not ipaddress.ip_address(ip).is_global for ip in ips)):
+                raise httpx.ConnectError("non-public DNS destination blocked", request=request)
+        except (OSError, asyncio.TimeoutError) as exc:
+            raise httpx.ConnectError("DNS resolution failed", request=request) from exc
+        pinned = httpx.Request(request.method, request.url.copy_with(host=ips[0]),
+                               headers=request.headers, stream=request.stream,
+                               extensions={**request.extensions, "sni_hostname": request.url.host})
+        # Pools must also be separated by original hostname: two virtual hosts
+        # sharing an IP must not reuse a TLS connection verified for the other.
+        if request.url.host not in self.transports:
+            self.transports[request.url.host] = httpx.AsyncHTTPTransport(retries=0, limits=httpx.Limits(
+                max_connections=self.concurrency, max_keepalive_connections=self.concurrency))
+        return await self.transports[request.url.host].handle_async_request(pinned)
+
+    async def aclose(self):
+        for transport in self.transports.values():
+            await transport.aclose()
+
+
 MAX_CT = 15_000_000
 URL_REGEX = re.compile(r"(?P<q>['\"`])(?P<url>(?:https?://|/)[^'\"`\s<>\\]{2,1000})(?P=q)")
 JS_RELATIVE = re.compile(
@@ -166,23 +277,23 @@ INJECTION_ROUTES = {
 EXECUTABLE_SCAN_TOOLS = {"sqlmap", "ghauri", "commix", "dalfox"}
 
 # Scan depth profiles. Depth (coverage) is tuned here; speed is a separate axis
-# controlled by --rate / --concurrency. In authorized scope prefer "fast" (high
-# thread count + moderate depth) or "deep" (max coverage). "safe" stays gentle.
+# controlled by each tool; --concurrency also caps its configured worker count.
+# The built-in request budget does not cover external tools.
 SCAN_PROFILES = {
     "safe": {
-        "sqlmap": {"level": 1, "risk": 1, "threads": 1, "random_agent": False},
+        "sqlmap": {"level": 1, "risk": 1, "threads": 1},
         "ghauri": {"level": 1, "threads": 1},
         "commix": {"level": 1},
         "dalfox": {"worker": 1, "mining": False, "deep_domxss": False},
     },
     "fast": {
-        "sqlmap": {"level": 3, "risk": 2, "threads": 10, "random_agent": True},
+        "sqlmap": {"level": 3, "risk": 2, "threads": 10},
         "ghauri": {"level": 2, "threads": 10},
         "commix": {"level": 2},
         "dalfox": {"worker": 40, "mining": True, "deep_domxss": False},
     },
     "deep": {
-        "sqlmap": {"level": 5, "risk": 3, "threads": 10, "random_agent": True},
+        "sqlmap": {"level": 5, "risk": 3, "threads": 10},
         "ghauri": {"level": 3, "threads": 10},
         "commix": {"level": 3},
         "dalfox": {"worker": 50, "mining": True, "deep_domxss": True},
@@ -221,6 +332,8 @@ class Scope:
         if not raw or len(raw) > 4096:
             return None
         try:
+            if any(ord(c) < 32 or ord(c) == 127 for c in raw):
+                return None
             raw = raw.strip()
             value = urljoin(base, raw) if base else raw
             p = urlsplit(value)
@@ -232,9 +345,9 @@ class Scope:
             port = p.port
             if port not in (None, 80, 443) or (port == 80 and p.scheme != "http") or (port == 443 and p.scheme != "https"):
                 return None
-            query = urlencode(sorted(parse_qsl(p.query, keep_blank_values=True))) if p.query else ""
+            query = p.query
             path = p.path or "/"
-            if any(ord(c) < 32 for c in path + query):
+            if "\\" in value or any(ord(c) < 32 or ord(c) == 127 for c in value):
                 return None
             return urlunsplit((p.scheme.lower(), h, path, query, ""))
         except (ValueError, UnicodeError, TypeError):
@@ -284,6 +397,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS authz(
                 url TEXT, identity TEXT, status INTEGER, body_hash TEXT, bytes INTEGER,
                 PRIMARY KEY(url, identity));
+            CREATE TABLE IF NOT EXISTS findings(kind TEXT, evidence TEXT, PRIMARY KEY(kind,evidence));
         """)
         self.conn.commit()
         self.max_urls = max_urls
@@ -323,11 +437,12 @@ class Store:
         existing = self.conn.execute("SELECT checked FROM urls WHERE url=?", (url,)).fetchone()
         if existing:
             self.conn.execute("INSERT OR IGNORE INTO url_sources VALUES(?,?)", (url, source))
-            if probe and existing[0] == 2:
-                self.conn.execute("UPDATE urls SET checked=0 WHERE url=?", (url,))
             return False
-        # Do not block dynamic/active sources from crawling if queue is full of passive URLs
-        if self.url_count >= self.max_urls and source in {"gau", "subfinder", "dns_wordlist"}:
+        # Reserve room for active discoveries while retaining a hard total cap.
+        passive_cap = max(1, int(self.max_urls * 0.8))
+        if self.url_count >= self.max_urls or (
+            source == "gau" and self.url_count >= passive_cap
+        ):
             return False
         value, tags = score(url)
         self.conn.execute(
@@ -407,13 +522,14 @@ class HTMLLinks(HTMLParser):
 
 
 class Throttle:
-    def __init__(self, rate: float, max_requests: int):
+    def __init__(self, rate: float, max_requests: int, reserve=None):
         self.rate = max(0.1, rate)
         self.cap = max_requests
         self.count = 0
         self.next_at = 0.0
         self.lock = asyncio.Lock()
         self.host_backoff: dict[str, float] = {}
+        self.reserve = reserve
 
     async def take(self, host: str) -> bool:
         # Never hold the lock across a sleep: a per-host backoff must not stall
@@ -427,6 +543,8 @@ class Throttle:
                 delay = max(0.0, self.next_at - now, self.host_backoff.get(host, 0) - now)
                 if delay <= 0:
                     self.count += 1
+                    if self.reserve:
+                        self.reserve(self.count)
                     self.next_at = now + (1.0 / self.rate)
                     return True
             await asyncio.sleep(delay)
@@ -440,6 +558,17 @@ class Recon:
         self.a = a
         self.scope = Scope(a.domain, a.subdomains, a.exclude)
         self.out = Path(a.out).resolve()
+        a.max_body = max(1, min(a.max_body, 20_000_000))
+        self.target_headers = parse_headers(a.header)
+        self.target_headers.setdefault("user-agent", a.user_agent)
+        self.public_headers = {k: v for k, v in self.target_headers.items() if k in PUBLIC_HEADERS}
+        self.credential_hosts = {self.scope.root}
+        for host in getattr(a, "credential_host", []) or []:
+            host = hostnorm(host)
+            if not self.scope.allowed_host(host):
+                raise ValueError("credential host must be in scope")
+            self.credential_hosts.add(host)
+        self.validate_scope_config()
         self.out.mkdir(parents=True, exist_ok=True)
         if os.name == "posix":
             os.chmod(self.out, 0o700)
@@ -450,11 +579,20 @@ class Recon:
         self.tool_dir = self.out / "tools"
         self.tool_dir.mkdir(exist_ok=True)
         self.store = Store(self.out / "state.sqlite", a.max_urls)
+        for key, attr in (("soft404_json", "soft404"), ("wildcard_json", "wildcard_dns")):
+            row = self.store.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+            if row:
+                try:
+                    value = json.loads(row[0])
+                    if isinstance(value, dict):
+                        setattr(self, attr, value)
+                except (ValueError, TypeError):
+                    LOG.warning("invalid stored calibration: %s", key)
         # Resume honours a cumulative request/probe ceiling across runs so repeated
         # resumes never exceed the authorized budget against the target.
         self.prior_requests = self.store.get_int("requests_total", 0)
         self.prior_probes = self.store.get_int("probes_total", 0)
-        self.gate = Throttle(a.rate, a.max_requests)
+        self.gate = Throttle(a.rate, a.max_requests, self.reserve_request)
         self.gate.count = self.prior_requests
         self.sem = asyncio.Semaphore(a.concurrency)
         self.dns_sem = asyncio.Semaphore(a.dns_concurrency)
@@ -464,21 +602,53 @@ class Recon:
         self.takeover_hits: list[dict] = []
         self.bypass_hits: list[dict] = []
         self.bola_findings: list[dict] = []
+        self.scan_plan_count = 0
+        self.origin_clients: dict[str, httpx.AsyncClient] = {}
+        self.client = self.make_client()
+        self.passive_client = self.make_client()
 
-        headers = {"User-Agent": a.user_agent}
-        for h in a.header or []:
-            if ":" in h:
-                k, v = h.split(":", 1)
-                headers[k.strip()] = v.strip()
-
-        self.client = httpx.AsyncClient(
-            timeout=a.timeout,
+    def make_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            timeout=self.a.timeout,
             verify=True,
             follow_redirects=False,
             trust_env=False,
-            headers=headers,
-            limits=httpx.Limits(max_connections=a.concurrency, max_keepalive_connections=a.concurrency),
+            transport=PinnedTransport(allow_private=self.a.allow_private, timeout=self.a.timeout,
+                                      concurrency=self.a.concurrency),
+            headers={"User-Agent": self.a.user_agent},
+            limits=httpx.Limits(max_connections=self.a.concurrency, max_keepalive_connections=self.a.concurrency),
         )
+
+    def headers_for(self, url: str) -> dict[str, str]:
+        p = urlsplit(url)
+        return dict(self.target_headers if p.scheme == "https" and p.hostname in self.credential_hosts else self.public_headers)
+
+    def client_for(self, url: str) -> httpx.AsyncClient:
+        p = urlsplit(url)
+        if p.hostname == self.scope.root and p.scheme == "https":
+            return self.client
+        origin = f"{p.scheme}://{p.netloc}"
+        if origin not in self.origin_clients:
+            self.origin_clients[origin] = self.make_client()
+        return self.origin_clients[origin]
+
+    async def aclose(self):
+        clients = [self.client, self.passive_client, *self.origin_clients.values()]
+        try:
+            for client in clients:
+                await client.aclose()
+        finally:
+            self.store.conn.close()
+
+    def reserve_request(self, count: int) -> None:
+        # Persist before sending: crashes may waste a slot, never reuse one.
+        self.store.set_int("requests_total", count)
+        self.store.commit()
+
+    def validate_scope_config(self) -> None:
+        existing = self.out / "run_config.json"
+        if existing.exists() and json.loads(existing.read_text(encoding="utf8")) != self.scope_config():
+            raise ValueError("output folder already belongs to a different scope/request context; use a new --out")
 
     def scope_config(self) -> dict:
         return {
@@ -487,16 +657,29 @@ class Recon:
             "exclude": sorted(self.a.exclude or []),
             "exclude_path": sorted(self.a.exclude_path or []),
             "allow_private": bool(self.a.allow_private),
+            "request_context_sha256": hashlib.sha256(json.dumps(
+                {"headers": self.target_headers, "identities": self.parse_identities(),
+                 "credential_hosts": sorted(self.credential_hosts)}, sort_keys=True
+            ).encode()).hexdigest(),
         }
 
-    def put_url(self, raw: str, source: str, base: str | None = None, probe: bool = True) -> None:
+    def permitted_url(self, raw: str, base: str | None = None, *, active: bool = True) -> str | None:
         u = self.scope.url(raw, base)
         if not u:
+            return None
+        variants = path_variants(urlsplit(u).path)
+        prefixes = {v for prefix in self.a.exclude_path for v in path_variants(prefix)}
+        if any(path.casefold().startswith(prefix.casefold()) for path in variants for prefix in prefixes):
+            return None
+        if active and any(UNSAFE_GET.search(path) for path in variants):
+            return None
+        return u
+
+    def put_url(self, raw: str, source: str, base: str | None = None, probe: bool = True) -> None:
+        u = self.permitted_url(raw, base, active=False)
+        if not u:
             return
-        path = urlsplit(u).path
-        if any(path.startswith(prefix) for prefix in self.a.exclude_path):
-            return
-        self.store.url(u, source, probe=probe and not bool(UNSAFE_GET.search(path)))
+        self.store.url(u, source, probe=probe and self.permitted_url(u) is not None)
         host = urlsplit(u).hostname
         if host:
             self.store.host(host, source)
@@ -518,23 +701,81 @@ class Recon:
         started = time.monotonic()
         code = None
         details = ""
+        proc = None
         try:
             with path.open("wb") as stdout, errpath.open("wb") as stderr:
-                proc = await asyncio.create_subprocess_exec(*argv, stdout=stdout, stderr=stderr)
+                proc = await asyncio.create_subprocess_exec(*argv, stdout=stdout, stderr=stderr,
+                    **({"start_new_session": True} if os.name == "posix" else {}))
                 try:
                     code = await asyncio.wait_for(proc.wait(), timeout=timeout or self.a.tool_timeout)
                 except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
+                    await self.stop_process(proc)
                     details = "timeout"
             if code not in (0, 1):
-                details = (details + " " + errpath.read_text(errors="replace")[-500:]).strip()
+                with errpath.open("rb") as stream:
+                    stream.seek(max(0, errpath.stat().st_size - 1000))
+                    tail = stream.read().decode("utf8", "replace")
+                details = self.redact((details + " " + tail[-500:]).strip())
                 LOG.warning("tool %s exit=%s: %s", name, code, details[:180])
         except OSError as exc:
             details = str(exc)
             LOG.warning("tool %s: %s", name, exc)
-        self.store.tool(name, argv, code, time.monotonic() - started, details)
+        except asyncio.CancelledError:
+            if proc is not None:
+                await self.stop_process(proc)
+            raise
+        self.store.tool(name, [self.redact(v) for v in argv], code, time.monotonic() - started, self.redact(details))
         return path if path.exists() else None
+
+    async def stop_process(self, proc):
+        if proc.returncode is not None:
+            return
+        try:
+            if os.name == "nt":
+                killer = await asyncio.create_subprocess_exec("taskkill", "/PID", str(proc.pid), "/T", "/F",
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                await killer.wait()
+                if proc.returncode is None:
+                    proc.kill()
+            else:
+                import signal
+                os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await proc.wait()
+
+    def secrets_for_redaction(self) -> dict[str, str]:
+        values = {v for k, v in self.target_headers.items() if k not in PUBLIC_HEADERS and v}
+        for headers in self.parse_identities().values():
+            values.update(v for k, v in headers.items() if k not in PUBLIC_HEADERS and v)
+        return {v: f"RECONFORGE_SECRET_{i}" for i, v in enumerate(sorted(values, key=lambda v: (-len(v), v)), 1)}
+
+    def redact(self, value: str) -> str:
+        for secret in self.secrets_for_redaction():
+            value = value.replace(secret, "<redacted>")
+        return value
+
+    def shell_command(self, argv: list[str]) -> str:
+        secrets = self.secrets_for_redaction()
+        if not secrets:
+            return " ".join(shlex.quote(v) for v in argv)
+        pattern = re.compile("|".join(re.escape(v) for v in secrets))
+        rendered = []
+        for arg in argv:
+            parts, start = [], 0
+            for match in pattern.finditer(arg):
+                parts.append(shlex.quote(arg[start:match.start()]))
+                parts.append('"${' + secrets[match.group()] + ':?Set this secret in the environment}"')
+                start = match.end()
+            parts.append(shlex.quote(arg[start:]))
+            rendered.append("".join(parts))
+        return " ".join(rendered)
+
+    def is_soft404(self, url: str) -> bool:
+        p = urlsplit(url)
+        baseline = self.soft404.get(f"{p.scheme}://{p.netloc}/")
+        row = self.store.conn.execute("SELECT status,body_hash FROM urls WHERE url=?", (url,)).fetchone()
+        return bool(baseline and row and row[0] == baseline["status"] and row[1] == baseline["body_hash"])
 
     def ingest_lines(self, path: Path | None, source: str, kind: str = "url") -> None:
         if not path:
@@ -554,7 +795,7 @@ class Recon:
 
     async def ct_provider(self, name: str, url: str, params: dict):
         try:
-            async with self.client.stream("GET", url, params=params) as r:
+            async with self.passive_client.stream("GET", url, params=params) as r:
                 if r.status_code != 200:
                     LOG.warning("%s HTTP %s", name, r.status_code)
                     return
@@ -751,17 +992,24 @@ class Recon:
                     if isinstance(paths, dict):
                         for endpoint in paths.keys():
                             if isinstance(endpoint, str) and endpoint.startswith("/"):
-                                self.put_url(endpoint, "openapi_path", url)
+                                methods = paths[endpoint]
+                                gettable = isinstance(methods, dict) and any(k.lower() in {"get", "head"} for k in methods)
+                                self.put_url(endpoint, "openapi_path", url, probe=gettable)
                 # Scan for URLs in strings
                 text = payload.decode("utf-8", "replace")
                 for match in URL_REGEX.finditer(text):
                     raw = match.group("url")
+                    if isinstance(data, dict) and isinstance(data.get("paths"), dict) and raw in data["paths"]:
+                        continue
                     if not raw.startswith("//"):
                         self.put_url(raw, "json_ref", url)
             except (json.JSONDecodeError, ValueError, UnicodeError):
                 pass
 
     async def probe(self, url: str):
+        if self.permitted_url(url) is None:
+            self.store.finish(url, {"error": "blocked_by_policy"})
+            return
         p = urlsplit(url)
         if not p.hostname or not await self.resolves(p.hostname):
             self.store.finish(url, {"error": "unresolvable_or_non_public_dns"})
@@ -769,9 +1017,12 @@ class Recon:
         async with self.sem:
             if not await self.gate.take(p.hostname):
                 return
+            self.probed += 1
+            self.store.set_int("probes_total", self.probed)
+            self.store.commit()
             data: dict = {}
             try:
-                async with self.client.stream("GET", url) as resp:
+                async with self.client_for(url).stream("GET", url, headers=self.headers_for(url)) as resp:
                     data["status"] = resp.status_code
                     ct = resp.headers.get("content-type", "").split(";")[0].lower()
                     data["content_type"] = ct
@@ -802,7 +1053,6 @@ class Recon:
                     self.put_url("http://" + p.hostname + "/", "http_fallback")
             finally:
                 self.store.finish(url, data)
-                self.probed += 1
 
     async def drain(self, max_probes: int, source: str | None = None):
         LOG.info("HTTP iterative queue, max probes %d", max_probes)
@@ -818,6 +1068,9 @@ class Recon:
 
     async def crawl_katana(self):
         if not self.a.katana:
+            return
+        if self.a.exclude or self.a.exclude_path:
+            LOG.warning("katana skipped: external crawler cannot enforce all configured exclusions; internal crawler remains enabled")
             return
         roots = [
             r[0]
@@ -842,6 +1095,7 @@ class Recon:
             "-d",
             str(self.a.crawl_depth),
             "-jc",
+            "-dr",
             "-kf",
             "all",
             "-cs",
@@ -857,6 +1111,8 @@ class Recon:
         ]
         if self.a.jsluice:
             cmd.append("-jsl")
+        for key, value in self.public_headers.items():
+            cmd += ["-H", f"{key}: {value}"]
         self.ingest_lines(await self.command("katana", cmd), "katana")
 
     async def calibrate_soft404(self, origin: str):
@@ -922,6 +1178,11 @@ class Recon:
             if i >= self.a.max_ffuf_hosts:
                 break
             output = self.tool_dir / f"ffuf_{i}.json"
+            safe_words = [w for w in words[: self.a.max_fuzz_words]
+                          if self.permitted_url(urljoin(origin, w))]
+            if not safe_words:
+                continue
+            wordfile.write_text("\n".join(dict.fromkeys(safe_words)) + "\n", encoding="utf8")
             cmd = [
                 "ffuf",
                 "-u",
@@ -942,6 +1203,8 @@ class Recon:
                 "-o",
                 str(output),
             ]
+            for key, value in self.headers_for(origin).items():
+                cmd += ["-H", f"{key}: {value}"]
             await self.command(f"ffuf_{i}", cmd)
             if output.exists():
                 try:
@@ -969,7 +1232,7 @@ class Recon:
             )
         ]
         async with async_playwright() as p:
-            browser = await p.chromium.launch()
+            browser = await p.chromium.launch(args=["--force-webrtc-ip-handling-policy=disable_non_proxied_udp"])
             try:
                 for url in pages:
                     if self.gate.count >= self.a.max_requests:
@@ -978,49 +1241,17 @@ class Recon:
                         user_agent=self.a.user_agent, service_workers="block", accept_downloads=False
                     )
                     page = await context.new_page()
-                    jobs = set()
+                    if not hasattr(context, "route_web_socket"):
+                        await context.close()
+                        LOG.warning("browser skipped: Playwright >=1.48 required to block WebSockets")
+                        break
+                    async def block_socket(ws):
+                        await ws.close()
+                    await context.route_web_socket("**/*", block_socket)
 
-                    async def intercept(route):
-                        try:
-                            req = route.request
-                            normalized = self.scope.url(req.url)
-                            if (
-                                not normalized
-                                or req.method not in ("GET", "HEAD")
-                                or UNSAFE_GET.search(urlsplit(normalized).path)
-                                or req.resource_type in ("image", "font", "media")
-                            ):
-                                await route.abort()
-                                return
-                            if not await self.resolves(urlsplit(normalized).hostname) or not await self.gate.take(
-                                urlsplit(normalized).hostname
-                            ):
-                                await route.abort()
-                                return
-                            self.put_url(normalized, "browser_request")
-                            await route.continue_()
-                        except Exception:
-                            pass
-
-                    async def capture(response):
-                        try:
-                            n = self.scope.url(response.url)
-                            if not n:
-                                return
-                            ct = response.headers.get("content-type", "").lower()
-                            if "javascript" in ct or urlsplit(n).path.endswith((".js", ".mjs")):
-                                body = await response.body()
-                                self.analyze_js(n, body[: self.a.max_body].decode("utf8", "replace"))
-                        except Exception:
-                            pass
-
-                    def on_response(resp):
-                        t = asyncio.create_task(capture(resp))
-                        jobs.add(t)
-                        t.add_done_callback(jobs.discard)
-
-                    await context.route("**/*", intercept)
-                    page.on("response", on_response)
+                    # The browser never continues directly onto the network. HTTPX
+                    # performs each bounded fetch; redirects are queued, not followed.
+                    await context.route("**/*", self.browser_route)
                     try:
                         await page.goto(url, wait_until="domcontentloaded", timeout=int(self.a.timeout * 1000))
                         await page.wait_for_timeout(min(self.a.render_wait, 5) * 1000)
@@ -1035,24 +1266,46 @@ class Recon:
                                 page.url,
                                 probe=item["method"].upper() == "GET",
                             )
-                        if jobs:
-                            await asyncio.wait(tuple(jobs), timeout=self.a.timeout)
                     except Exception as exc:
                         LOG.debug("browser %s: %s", url, type(exc).__name__)
                     finally:
                         await context.close()
-                        for j in tuple(jobs):
-                            j.cancel()
-                        if jobs:
-                            await asyncio.gather(*jobs, return_exceptions=True)
                     self.store.commit()
             finally:
                 await browser.close()
 
-    async def raw_get(self, url: str, extra_headers: dict | None = None) -> dict | None:
+    async def browser_route(self, route):
+        req = route.request
+        normalized = self.permitted_url(req.url)
+        if (not normalized or req.method not in {"GET", "HEAD"}
+                or req.resource_type in {"image", "font", "media", "websocket"}):
+            await route.abort()
+            return
+        try:
+            res = await self.raw_get(normalized, method=req.method)
+            if not res or "status" not in res or res.get("truncated"):
+                await route.abort()
+                return
+            if 300 <= res["status"] < 400:
+                if res.get("location"):
+                    self.put_url(res["location"], "browser_redirect", normalized)
+                await route.abort()
+                return
+            self.put_url(normalized, "browser_request")
+            if res["status"] < 400:
+                self.extract(normalized, res["content_type"], res["body"])
+            await route.fulfill(status=res["status"], headers=res["headers"], body=res["body"])
+        except Exception as exc:
+            LOG.debug("browser route failed: %s", type(exc).__name__)
+            await route.abort()
+
+    async def raw_get(self, url: str, extra_headers: dict | None = None, *,
+                      client: httpx.AsyncClient | None = None, method: str = "GET") -> dict | None:
         """Scope-safe, throttled, GET-only side-channel fetch that does NOT touch the
         urls table. Used by the takeover / 403-bypass / authz passes so their probes
         reuse the same budget and rate limits without polluting discovery output."""
+        if method not in {"GET", "HEAD"} or self.permitted_url(url) is None:
+            return None
         p = urlsplit(url)
         if not p.hostname or not await self.resolves(p.hostname):
             return None
@@ -1060,14 +1313,20 @@ class Recon:
             if not await self.gate.take(p.hostname):
                 return None
             try:
-                async with self.client.stream("GET", url, headers=extra_headers or None) as resp:
+                headers = dict(extra_headers or {}) if client is not None else self.headers_for(url)
+                if client is None and extra_headers:
+                    headers.update(extra_headers)
+                async with (client or self.client_for(url)).stream(method, url, headers=headers) as resp:
                     body = bytearray()
+                    truncated = False
                     async for part in resp.aiter_bytes():
                         remain = self.a.max_body - len(body)
                         if remain <= 0:
+                            truncated = True
                             break
                         body.extend(part[:remain])
                         if len(body) >= self.a.max_body:
+                            truncated = True
                             break
                     if resp.status_code in (429, 503):
                         self.gate.slow(p.hostname)
@@ -1078,6 +1337,9 @@ class Recon:
                         "content_type": resp.headers.get("content-type", "").split(";")[0].lower(),
                         "location": resp.headers.get("location", ""),
                         "body": bytes(body),
+                        "truncated": truncated,
+                        "headers": {k: v for k, v in resp.headers.items()
+                                    if k.lower() not in {"content-encoding", "content-length", "transfer-encoding", "connection", "set-cookie"}},
                     }
             except (httpx.HTTPError, UnicodeError, OSError) as exc:
                 return {"error": type(exc).__name__}
@@ -1109,23 +1371,25 @@ class Recon:
             if self.gate.count >= self.a.max_requests:
                 break
             cname = await self._cname(h) if have_dns else None
-            if cname and not await self.resolves(cname):
-                self.takeover_hits.append({"host": h, "cname": cname, "service": None, "signal": "cname_nxdomain"})
-                continue
+            if cname:
+                # A timeout, private address or NoAnswer is not NXDOMAIN.
+                try:
+                    await dns.asyncresolver.resolve(cname, "A", lifetime=self.a.timeout)
+                except dns.resolver.NXDOMAIN:
+                    self.add_finding("takeover", {"host": h, "cname": cname, "service": None, "signal": "cname_nxdomain"})
+                    continue
+                except Exception as exc:
+                    LOG.debug("CNAME target lookup inconclusive: %s", type(exc).__name__)
             res = await self.raw_get("https://" + h + "/")
             if not res or "body" not in res:
                 continue
             for service, rx in TAKEOVER_FINGERPRINTS:
                 if rx.search(res["body"]):
-                    self.takeover_hits.append(
+                    self.add_finding("takeover",
                         {"host": h, "cname": cname, "service": service, "status": res["status"], "signal": "http_fingerprint"}
                     )
                     LOG.warning("takeover candidate: %s -> %s (%s)", h, service, cname or "no-cname")
                     break
-        if self.takeover_hits:
-            (self.out / "takeover_candidates.jsonl").write_text(
-                "\n".join(json.dumps(x, ensure_ascii=False) for x in self.takeover_hits) + "\n", encoding="utf8"
-            )
 
     async def bypass_403(self):
         """Retry forbidden endpoints with GET-only header/path tricks."""
@@ -1153,17 +1417,16 @@ class Recon:
                     attempts.append((candidate, "path:" + suffix, None))
             for target, technique, headers in attempts:
                 if self.gate.count >= self.a.max_requests:
-                    return
+                    break
                 res = await self.raw_get(target, headers)
-                if res and res.get("status") is not None and res["status"] < 400 and res.get("body_hash") != forbidden_hash:
-                    self.bypass_hits.append(
-                        {"url": url, "technique": technique, "target": target, "status": res["status"], "bytes": res.get("bytes")}
+                if (res and 200 <= res.get("status", 999) < 300 and res.get("bytes", 0) > 0
+                        and not res.get("truncated") and res.get("body_hash") != forbidden_hash):
+                    self.add_finding("bypass",
+                        {"url": url, "technique": technique, "target": target, "status": res["status"],
+                         "bytes": res.get("bytes"), "body_hash": res.get("body_hash"),
+                         "detail": "response changed; protected resource access requires manual verification"}
                     )
-                    LOG.warning("403 bypass: %s via %s -> %s", url, technique, res["status"])
-        if self.bypass_hits:
-            (self.out / "bypass403_candidates.jsonl").write_text(
-                "\n".join(json.dumps(x, ensure_ascii=False) for x in self.bypass_hits) + "\n", encoding="utf8"
-            )
+                    LOG.warning("403 bypass candidate: %s via %s -> %s", url, technique, res["status"])
 
     def parse_identities(self) -> dict[str, dict]:
         """--identity 'LABEL:Header: Value'; repeat the label to add headers."""
@@ -1174,9 +1437,8 @@ class Recon:
             if not sep or not label or ":" not in header:
                 raise SystemExit(f"--identity must be 'LABEL:Header: Value' (got {spec!r})")
             key, _, value = header.partition(":")
-            key, value = key.strip(), value.strip()
-            if not key or "\n" in header or "\r" in header:
-                raise SystemExit(f"invalid header in --identity {spec!r}")
+            parsed = parse_headers([header])
+            key, value = next(iter(parsed.items()))
             if label.lower() == "anon":
                 raise SystemExit("--identity label 'anon' is reserved")
             identities.setdefault(label, {})[key] = value
@@ -1204,63 +1466,87 @@ class Recon:
             if not UNSAFE_GET.search(urlsplit(r[0]).path)
         ]
         matrix: dict[str, dict] = {}
-        for url in targets:
-            if self.gate.count >= self.a.max_requests:
-                break
-            row: dict[str, dict] = {}
-            for label, headers in sessions.items():
-                res = await self.raw_get(url, headers or None)
-                if res and res.get("status") is not None:
-                    self.store.authz(url, label, res["status"], res.get("body_hash"), res.get("bytes"))
-                    row[label] = res
-            matrix[url] = row
+        async with AsyncExitStack() as stack:
+            clients = {}
+            for url in targets:
+                if self.gate.count >= self.a.max_requests:
+                    break
+                row: dict[str, dict] = {}
+                origin = urlunsplit((*urlsplit(url)[:2], "", "", ""))
+                for label, headers in sessions.items():
+                    # Identity credentials never inherit the discovery client's
+                    # credentials/cookies, nor cross origins implicitly.
+                    key = (origin, label)
+                    if key not in clients:
+                        clients[key] = await stack.enter_async_context(self.make_client())
+                    request_headers = dict(self.public_headers)
+                    if label != "anon" and urlsplit(url).scheme == "https" and urlsplit(url).hostname in self.credential_hosts:
+                        request_headers.update(headers)
+                    elif label != "anon":
+                        continue
+                    res = await self.raw_get(url, request_headers, client=clients[key])
+                    if res and res.get("status") is not None:
+                        self.store.authz(url, label, res["status"], res.get("body_hash"), res.get("bytes"))
+                        row[label] = res
+                matrix[url] = row
         self.store.commit()
         labels = list(identities)
         for url, row in matrix.items():
             def ok(label):
                 r = row.get(label)
-                return bool(r) and r.get("status", 999) < 400
+                return bool(r) and 200 <= r.get("status", 999) < 300 and not r.get("truncated") and r.get("bytes", 0) > 0
 
             def same(a, b):
                 ra, rb = row.get(a), row.get(b)
                 if not ra or not rb:
                     return False
-                return ra.get("body_hash") == rb.get("body_hash") or (
-                    ra.get("bytes") is not None
-                    and rb.get("bytes") is not None
-                    and abs(ra["bytes"] - rb["bytes"]) < 64
-                )
+                return bool(ra.get("body_hash")) and ra.get("body_hash") == rb.get("body_hash")
 
-            # Broken auth: a protected-looking endpoint served to the anonymous client
-            if ok("anon") and re.search(r"/(?:api|admin|internal|account|user|order|invoice|payment)", urlsplit(url).path, re.I):
-                self.bola_findings.append({"url": url, "type": "anonymous_access", "detail": "reachable without any identity"})
+            # A public API returning 200 alone is not an authorization finding.
             # Horizontal access: two distinct identities get the identical resource
             for i in range(len(labels)):
                 for j in range(i + 1, len(labels)):
                     a, b = labels[i], labels[j]
                     if ok(a) and ok(b) and same(a, b):
-                        self.bola_findings.append(
+                        self.add_finding("bola",
                             {"url": url, "type": "cross_identity_identical", "identities": [a, b],
                              "detail": "same 2xx body under different accounts — verify object ownership"}
                         )
             # Identity sees anon-identical response (token ignored) OR vice-versa
             for a in labels:
                 if ok(a) and ok("anon") and same(a, "anon"):
-                    self.bola_findings.append(
+                    self.add_finding("bola",
                         {"url": url, "type": "auth_not_enforced", "identities": [a, "anon"],
                          "detail": "authenticated and anonymous responses identical"}
                     )
-        if self.bola_findings:
-            (self.out / "bola_candidates.jsonl").write_text(
-                "\n".join(json.dumps(x, ensure_ascii=False) for x in self.bola_findings) + "\n", encoding="utf8"
-            )
+
+    def add_finding(self, kind: str, evidence: dict) -> None:
+        target = {"takeover": self.takeover_hits, "bypass": self.bypass_hits, "bola": self.bola_findings}[kind]
+        encoded = json.dumps(evidence, sort_keys=True, ensure_ascii=False)
+        self.store.conn.execute("INSERT OR IGNORE INTO findings VALUES(?,?)", (kind, encoded))
+        self.store.commit()
+        if evidence not in target:
+            target.append(evidence)
 
     def export(self):
+        for key, value in (("soft404_json", self.soft404), ("wildcard_json", self.wildcard_dns)):
+            self.store.conn.execute(
+                "INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, json.dumps(value)))
         self.store.commit()
+        for kind, attr, filename in (
+            ("takeover", "takeover_hits", "takeover_candidates.jsonl"),
+            ("bypass", "bypass_hits", "bypass403_candidates.jsonl"),
+            ("bola", "bola_findings", "bola_candidates.jsonl"),
+        ):
+            entries = [json.loads(r[0]) for r in self.store.conn.execute(
+                "SELECT evidence FROM findings WHERE kind=? ORDER BY evidence", (kind,))]
+            setattr(self, attr, entries)
+            atomic_text(self.out / filename, "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries))
 
         def lines(name, sql):
             rows = [r[0] for r in self.store.conn.execute(sql)]
-            (self.out / name).write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf8")
+            atomic_text(self.out / name, "\n".join(rows) + ("\n" if rows else ""))
 
         # soft-404 calibration markers are internal controls; keep them out of the
         # human-facing URL lists (they stay in the DB for the CSV's likely_soft404 flag).
@@ -1278,7 +1564,7 @@ class Recon:
         )
         lines("manual-review-only.txt", "SELECT url FROM urls WHERE checked=2 ORDER BY priority DESC")
 
-        with (self.out / "priority.csv").open("w", encoding="utf8", newline="") as f:
+        with atomic_open(self.out / "priority.csv", newline="") as f:
             out = csv.writer(f)
             out.writerow(["priority", "url", "tags", "status", "source", "likely_soft404", "error"])
             for row in self.store.conn.execute(
@@ -1291,24 +1577,24 @@ class Recon:
                 likely = False
                 if baseline and source != "soft404_control":
                     if baseline["status"] == status and (
-                        baseline["body_hash"] == digest or (size is not None and abs(size - baseline["bytes"]) < 100)
+                        baseline["body_hash"] == digest
                     ):
                         likely = True
                 out.writerow([pri, url, tags, status, source, likely, error])
 
-        with (self.out / "http.jsonl").open("w", encoding="utf8") as f:
+        with atomic_open(self.out / "http.jsonl") as f:
             cols = "url,status,content_type,bytes,title,location,body_hash,error,source".split(",")
             for row in self.store.conn.execute("SELECT " + ",".join(cols) + " FROM urls WHERE checked=1"):
                 f.write(json.dumps(dict(zip(cols, row)), ensure_ascii=False) + "\n")
 
-        with (self.out / "url_provenance.jsonl").open("w", encoding="utf8") as f:
+        with atomic_open(self.out / "url_provenance.jsonl") as f:
             for url, src in self.store.conn.execute("SELECT url,source FROM url_sources ORDER BY url,source"):
                 f.write(json.dumps({"url": url, "source": src}) + "\n")
 
-        (self.out / "dns_wildcard.json").write_text(json.dumps(self.wildcard_dns, indent=2), encoding="utf8")
-        (self.out / "soft404_baselines.json").write_text(json.dumps(self.soft404, indent=2), encoding="utf8")
+        atomic_text(self.out / "dns_wildcard.json", json.dumps(self.wildcard_dns, indent=2))
+        atomic_text(self.out / "soft404_baselines.json", json.dumps(self.soft404, indent=2))
 
-        with (self.out / "secret_indicators.jsonl").open("w", encoding="utf8") as f:
+        with atomic_open(self.out / "secret_indicators.jsonl") as f:
             for row in self.store.conn.execute("SELECT kind,fingerprint,source,line FROM secret_indicators"):
                 f.write(json.dumps(dict(zip(["kind", "sha256", "source", "line"], row))) + "\n")
 
@@ -1316,7 +1602,7 @@ class Recon:
             "SELECT url, identity, status, body_hash, bytes FROM authz ORDER BY url, identity"
         ).fetchall()
         if authz_rows:
-            with (self.out / "authz_matrix.csv").open("w", encoding="utf8", newline="") as f:
+            with atomic_open(self.out / "authz_matrix.csv", newline="") as f:
                 out = csv.writer(f)
                 out.writerow(["url", "identity", "status", "body_hash", "bytes"])
                 out.writerows(authz_rows)
@@ -1340,42 +1626,47 @@ class Recon:
             "takeover_candidates": len(self.takeover_hits),
             "bypass_403_candidates": len(self.bypass_hits),
             "bola_candidates": len(self.bola_findings),
-            "scan_plan_endpoints": self.store.conn.execute(
-                "SELECT COUNT(*) FROM urls WHERE checked=1 AND status BETWEEN 200 AND 399 AND instr(url,'?')>0"
-            ).fetchone()[0],
+            "scan_plan_endpoints": self.scan_plan_count,
             "scan_profile": self.a.scan_profile,
             "auto_scan": bool(self.a.auto_scan),
             "external_requests_not_in_builtin_budget": True,
             "note": "Candidates are not confirmed vulnerabilities; tool findings require manual verification.",
         }
-        (self.out / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf8")
+        atomic_text(self.out / "summary.json", json.dumps(summary, indent=2, ensure_ascii=False))
         LOG.info("summary: %s", json.dumps(summary, ensure_ascii=False))
 
     def _scan_argv(self, tool: str, url: str, scan_dir: Path, idx: int = 0) -> list[str]:
         """Single source of truth for per-URL scanner invocations — shared by the
         manual --scanners path, the generated scan_plan.sh, and --auto-scan. Depth
         comes from the --scan-profile; speed from --rate (delay) and thread count."""
+        if self.permitted_url(url) is None:
+            raise ValueError("scanner target blocked by policy")
         delay = round(1.0 / self.a.rate, 3)
         t = self.a.timeout
         prof = SCAN_PROFILES[self.a.scan_profile][tool]
+        headers = self.headers_for(url)
+        bulk_headers = "\n".join(f"{k}: {v}" for k, v in headers.items())
+        threads = min(self.a.concurrency, prof.get("threads", prof.get("worker", 1)))
         if tool == "sqlmap":
             argv = ["sqlmap", "-u", url, "--batch", f"--level={prof['level']}", f"--risk={prof['risk']}",
-                    f"--threads={prof['threads']}", "--retries=0", f"--timeout={t}", f"--delay={delay}",
+                    f"--threads={threads}", "--retries=0", f"--timeout={t}", f"--delay={delay}",
+                    "--ignore-redirects", "--headers", bulk_headers,
                     "--disable-coloring", f"--output-dir={scan_dir / 'sqlmap'}"]
-            if prof["random_agent"]:
-                argv.append("--random-agent")
             return argv
         if tool == "ghauri":
             return ["ghauri", "-u", url, "--batch", "--level", str(prof["level"]), "--confirm",
-                    "--threads", str(prof["threads"]), "--timeout", str(t), "--delay", str(delay)]
+                    "--threads", str(threads), "--timeout", str(t), "--delay", str(delay),
+                    "--headers", bulk_headers]
         if tool == "commix":
-            return ["commix", "--batch", "-u", url, "--level", str(prof["level"]), f"--timeout={t}", "--delay", str(delay)]
+            return ["commix", "--batch", "-u", url, "--level", str(prof["level"]), f"--timeout={t}",
+                    "--delay", str(delay), "--ignore-redirects", "--headers", bulk_headers]
         if tool == "dalfox":
-            argv = ["dalfox", "url", url, "--worker", str(prof["worker"]), "--delay", str(int(delay * 1000)),
-                    "--timeout", str(t), "--format", "jsonl", "--output", str(scan_dir / f"dalfox_{idx}.jsonl"),
-                    "--include-url", self.scope.regex()]
+            argv = ["dalfox", "url", url, "--worker", str(threads), "--delay", str(int(delay * 1000)),
+                    "--timeout", str(t), "--format", "jsonl", "--output", str(scan_dir / f"dalfox_{idx}.jsonl")]
+            for key, value in headers.items():
+                argv += ["-H", f"{key}: {value}"]
             if not prof["mining"]:
-                argv += ["--skip-mining-all", "--only-poc"]
+                argv += ["--skip-mining-all"]
             if prof["deep_domxss"]:
                 argv.append("--deep-domxss")
             return argv
@@ -1383,7 +1674,9 @@ class Recon:
 
     def _nuclei_argv(self, input_file: Path) -> list[str]:
         cmd = ["nuclei", "-l", str(input_file), "-rl", str(max(1, int(self.a.rate))), "-c", "1",
-               "-timeout", str(self.a.timeout), "-retries", "0", "-ni", "-no-color", "-jsonl", "-or"]
+               "-timeout", str(self.a.timeout), "-retries", "0", "-ni", "-dr", "-no-color", "-jsonl", "-or"]
+        for key, value in self.public_headers.items():
+            cmd += ["-H", f"{key}: {value}"]
         if self.a.nuclei_tags:
             cmd.extend(["-tags", self.a.nuclei_tags])
         if self.a.nuclei_templates:
@@ -1392,6 +1685,9 @@ class Recon:
 
     async def scanners(self):
         if not self.a.scanners:
+            return
+        if self.a.exclude or self.a.exclude_path:
+            LOG.warning("external scanners skipped: cannot guarantee configured exclusions; plan remains reviewable")
             return
         scan_dir = self.out / "scanners"
         scan_dir.mkdir(exist_ok=True)
@@ -1424,6 +1720,11 @@ class Recon:
                     LOG.warning("%s missing in PATH; skipped", tool)
                     continue
                 for i, u in enumerate(params):
+                    if self.permitted_url(u) is None or not await self.resolves(urlsplit(u).hostname):
+                        continue
+                    if tool == "ghauri" and any(k not in PUBLIC_HEADERS for k in self.headers_for(u)):
+                        LOG.warning("ghauri skipped for authenticated target: redirect policy is not guaranteed")
+                        continue
                     await self.command(f"scanner_{tool}_{i}", self._scan_argv(tool, u, scan_dir, i))
 
     def classify_url(self, url: str) -> tuple[dict[str, tuple], list[str]]:
@@ -1447,6 +1748,8 @@ class Recon:
         plan: list[dict] = []
         tool_targets: dict[str, list[str]] = defaultdict(list)
         for url in rows:
+            if self.permitted_url(url) is None or self.is_soft404(url):
+                continue
             hits, names = self.classify_url(url)
             if not hits:
                 continue
@@ -1459,14 +1762,10 @@ class Recon:
             for t in tools:
                 if t in EXECUTABLE_SCAN_TOOLS:
                     tool_targets[t].append(url)
-        if not plan:
-            LOG.info("scan planner: no parameterized endpoints matched a known injection class")
-            return
+        self.scan_plan_count = len(plan)
         scan_dir = self.out / "scanners"
         scan_dir.mkdir(exist_ok=True)
-        (self.out / "scan_plan.json").write_text(
-            "\n".join(json.dumps(x, ensure_ascii=False) for x in plan) + "\n", encoding="utf8"
-        )
+        atomic_text(self.out / "scan_plan.json", "".join(json.dumps(x, ensure_ascii=False) + "\n" for x in plan))
         self._write_scan_script(plan, tool_targets, scan_dir)
         suggested = sorted({t for p in plan for t in p["suggested_tools"]})
         LOG.info("scan planner: %d endpoints, tools suggested: %s", len(plan), ", ".join(suggested))
@@ -1487,17 +1786,29 @@ class Recon:
             lines.append(f"# === {tool} ===")
             for i, url in enumerate(dict.fromkeys(tool_targets[tool])):
                 argv = self._scan_argv(tool, url, scan_dir, i)
-                lines.append(" ".join(shlex.quote(x) for x in argv))
+                command = self.shell_command(argv)
+                if self.a.exclude or self.a.exclude_path:
+                    lines.append("# DISABLED: external tool cannot guarantee exclusions")
+                    lines.extend("# " + line for line in command.splitlines())
+                elif tool == "ghauri" and any(k not in PUBLIC_HEADERS for k in self.headers_for(url)):
+                    lines.append("# DISABLED: authenticated ghauri redirects require manual review")
+                    lines.extend("# " + line for line in command.splitlines())
+                else:
+                    lines.append(command)
             lines.append("")
         # Suggestions that stay manual / need template review
         manual = [p for p in plan if any(t in ("manual", "nuclei-ssrf", "nuclei-lfi") for t in p["suggested_tools"])]
         if manual:
             lines.append("# === manual review (SSRF/LFI/redirect — verify by hand or with reviewed nuclei templates) ===")
             for p in manual:
-                lines.append(f"#   {p['url']}  [{','.join(p['classes'])}]  params={','.join(p['params'])}")
-        (self.out / "scan_plan.sh").write_text("\n".join(lines) + "\n", encoding="utf8")
+                comment = f"{p['url']}  [{','.join(p['classes'])}]  params={','.join(p['params'])}"
+                lines.extend("#   " + line for line in comment.splitlines())
+        atomic_text(self.out / "scan_plan.sh", "\n".join(lines) + "\n")
 
     async def _run_plan(self, tool_targets, scan_dir: Path) -> None:
+        if self.a.exclude or self.a.exclude_path:
+            LOG.warning("auto-scan skipped: external tools cannot guarantee configured exclusions")
+            return
         for tool in sorted(tool_targets):
             if tool not in EXECUTABLE_SCAN_TOOLS:
                 continue
@@ -1505,6 +1816,11 @@ class Recon:
                 LOG.warning("auto-scan: %s not in PATH; skipped (%d targets)", tool, len(set(tool_targets[tool])))
                 continue
             for i, url in enumerate(dict.fromkeys(tool_targets[tool])):
+                if self.permitted_url(url) is None or not await self.resolves(urlsplit(url).hostname):
+                    continue
+                if tool == "ghauri" and any(k not in PUBLIC_HEADERS for k in self.headers_for(url)):
+                    LOG.warning("ghauri skipped for authenticated target: redirect policy is not guaranteed")
+                    continue
                 LOG.info("auto-scan %s -> %s", tool, url)
                 await self.command(f"autoscan_{tool}_{i}", self._scan_argv(tool, url, scan_dir, i))
 
@@ -1533,15 +1849,19 @@ class Recon:
 
     async def run(self):
         try:
-            existing = self.out / "run_config.json"
-            cfg = self.scope_config()
-            if existing.exists():
-                previous = json.loads(existing.read_text(encoding="utf8"))
-                if previous != cfg:
-                    raise ValueError("output folder already belongs to a different scope")
-            else:
-                existing.write_text(json.dumps(cfg, indent=2), encoding="utf8")
+            with RunLock(self.out / ".run.lock"):
+                self.validate_scope_config()
+                self.gate.count = self.store.get_int("requests_total", 0)
+                self.probed = self.store.get_int("probes_total", 0)
+                await self._run_locked()
+        finally:
+            await self.aclose()
 
+    async def _run_locked(self):
+        existing = self.out / "run_config.json"
+        if not existing.exists():
+            atomic_text(existing, json.dumps(self.scope_config(), indent=2))
+        try:
             await self.passive()
             if self.a.passive_only:
                 return
@@ -1567,8 +1887,6 @@ class Recon:
             await self.plan_scans()
         finally:
             self.export()
-            await self.client.aclose()
-            self.store.conn.close()
 
 
 def build_parser():
@@ -1578,6 +1896,8 @@ def build_parser():
     p.add_argument("--exclude", action="append", default=[], help="exclude hostname and all its descendants")
     p.add_argument("--exclude-path", action="append", default=[], help="do not actively fetch this URL path prefix")
     p.add_argument("-H", "--header", action="append", default=[], help="custom header in 'Header: Value' format (e.g. for Bug Bounty IDs)")
+    p.add_argument("--credential-host", action="append", default=[],
+                   help="additional exact in-scope hostname allowed to receive private headers/identities over HTTPS (default: apex only)")
     p.add_argument("--out", default="reconforge-output")
     p.add_argument("--passive-only", action="store_true")
     p.add_argument("--no-enum", action="store_true")
@@ -1680,6 +2000,7 @@ def main():
         and a.max_pages >= 1
         and a.max_crawl_hosts >= 1
         and a.max_fuzz_words >= 1
+        and a.max_ffuf_hosts >= 1
         and a.render_wait >= 0
     ):
         raise SystemExit("Invalid limits; review --help")
