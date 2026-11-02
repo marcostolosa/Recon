@@ -2,6 +2,7 @@
 import asyncio
 from contextlib import closing
 import json
+import hashlib
 from pathlib import Path
 import socket
 import sqlite3
@@ -115,10 +116,22 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_identical_resource_is_candidate_with_evidence(self):
         self.seed('https://example.com/api/account')
-        self.responses['/api/account'] = httpx.Response(200, text='same protected resource')
+        # Genuinely gated: anonymous is forbidden, so the identical body that accounts
+        # A and B both receive is NOT public — that is the real cross-account signal.
+        self.responses['/api/account'] = lambda req: (
+            httpx.Response(200, text='same protected resource')
+            if req.headers.get('authorization') else httpx.Response(401, text='login required'))
         await self.r.bola()
         self.assertTrue(any(f['type'] == 'cross_identity_identical' for f in self.r.bola_findings))
         self.assertGreater(self.r.store.conn.execute('SELECT COUNT(*) FROM findings').fetchone()[0], 0)
+
+    async def test_public_page_identical_for_all_is_not_a_finding(self):
+        # Regression for the false positive: if anon sees the SAME body as A and B,
+        # the resource is public and must NOT be flagged as a BOLA candidate.
+        self.seed('https://example.com/about')
+        self.responses['/about'] = httpx.Response(200, text='public about page')
+        await self.r.bola()
+        self.assertFalse(self.r.bola_findings)
 
     async def test_redirects_are_not_authz_success(self):
         self.seed('https://example.com/api/account')
@@ -234,6 +247,13 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         await self.r.plan_scans()
         self.assertEqual(self.r.scan_plan_count, 3)
 
+    async def test_planner_does_not_scan_static_build_ids(self):
+        self.seed('https://example.com/livewire/livewire.js?id=df3a17f2')
+        self.seed('https://example.com/api/item?id=df3a17f2')
+        await self.r.plan_scans()
+        self.assertEqual(self.r.scan_plan_count, 1)
+        self.assertIn('/api/item?', self.r.plan_items[0]['url'])
+
     async def test_openapi_non_get_operations_remain_manual(self):
         payload = json.dumps({'paths': {'/submit': {'post': {}}, '/fetch': {'get': {}}}}).encode()
         self.r.extract('https://example.com/openapi.json', 'application/json', payload)
@@ -259,6 +279,27 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
     async def test_query_representation_is_preserved(self):
         url = 'https://example.com/?x=2&x=1&encoded=%2f&space=%20'
         self.assertEqual(Scope('example.com', False, []).url(url), url)
+
+    async def test_integer_delay_scanner_contracts(self):
+        self.r.a.rate = 5
+        self.r.a.exclude_path = []
+        for tool in ('commix', 'ghauri'):
+            argv = self.r._scan_argv(tool, 'https://example.com/?q=test', Path(self.temp.name))
+            self.assertEqual(argv[argv.index('--delay') + 1], '1')
+
+    async def test_html_fallback_is_not_parsed_as_javascript(self):
+        payload = b'<!doctype html><html><script src="fake.js"></script></html>'
+        self.r.extract('https://example.com/missing.js', 'text/html', payload)
+        self.r.extract('https://example.com/missing.mjs', 'application/javascript', payload)
+        self.assertFalse(self.r.js_saved)
+        self.assertFalse(self.r.store.pending(10))
+
+    async def test_dashboard_state_cannot_close_script_element(self):
+        self.seed('https://example.com/</script><script>alert(1)</script>')
+        self.r.export()
+        html = (Path(self.temp.name) / 'dashboard.html').read_text(encoding='utf8')
+        self.assertNotIn('</script><script>alert(1)</script>', html)
+        self.assertIn('\\u003c/script\\u003e', html)
 
     async def test_ffuf_filters_words_before_external_execution(self):
         self.r.a.ffuf = True
@@ -299,6 +340,14 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         self.r.export()
         content = (Path(self.temp.name) / 'bypass403_candidates.jsonl').read_text(encoding='utf8')
         self.assertIn('private', content)
+
+    async def test_bypass_ignores_normal_homepage_responses(self):
+        self.r.a.bypass_403 = True
+        self.seed('https://example.com/', body_hash=hashlib.sha256(b'default').hexdigest())
+        self.seed('https://example.com/private', status=403, body_hash='forbidden')
+        self.responses['/private'] = httpx.Response(403, text='forbidden')
+        await self.r.bypass_403()
+        self.assertFalse(self.r.bypass_hits)
 
     async def test_changed_identity_override_order_invalidates_resume_context(self):
         self.r.a.identity = ['A:Authorization: FIRST', 'A:Authorization: LAST']

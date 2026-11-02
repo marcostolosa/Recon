@@ -17,6 +17,7 @@ import importlib.util
 import ipaddress
 import json
 import logging
+import math
 import os
 import posixpath
 from pathlib import Path
@@ -656,21 +657,35 @@ def atomic_open(path: Path, **kwargs):
 
 class PinnedTransport(httpx.AsyncBaseTransport):
     """Resolve, validate and connect to the same IP, preserving Host and TLS SNI."""
-    def __init__(self, *, allow_private: bool, timeout: float, concurrency: int):
+    def __init__(self, *, allow_private: bool, timeout: float, concurrency: int, dns_ttl: float = 300.0):
         self.allow_private = allow_private
         self.timeout = timeout
         self.concurrency = concurrency
         self.transports = {}
+        # Cache validated IPs per (host, port) so we don't re-run getaddrinfo on every
+        # request and saturate asyncio's default thread executor. Pinning to the cached
+        # validated IP also keeps the anti-DNS-rebinding guarantee intact.
+        self.dns_ttl = dns_ttl
+        self._dns_cache: dict[tuple, tuple[list[str], float]] = {}
 
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+    async def _resolve(self, host: str, port, request: httpx.Request) -> list[str]:
+        key = (host, port)
+        cached = self._dns_cache.get(key)
+        if cached and cached[1] > time.monotonic():
+            return cached[0]
         try:
             records = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(
-                request.url.host, request.url.port, type=socket.SOCK_STREAM), self.timeout)
+                host, port, type=socket.SOCK_STREAM), self.timeout)
             ips = list(dict.fromkeys(row[4][0] for row in records))
             if not ips or (not self.allow_private and any(not ipaddress.ip_address(ip).is_global for ip in ips)):
                 raise httpx.ConnectError("non-public DNS destination blocked", request=request)
         except (OSError, asyncio.TimeoutError) as exc:
             raise httpx.ConnectError("DNS resolution failed", request=request) from exc
+        self._dns_cache[key] = (ips, time.monotonic() + self.dns_ttl)
+        return ips
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        ips = await self._resolve(request.url.host, request.url.port, request)
         pinned = httpx.Request(request.method, request.url.copy_with(host=ips[0]),
                                headers=request.headers, stream=request.stream,
                                extensions={**request.extensions, "sni_hostname": request.url.host})
@@ -847,6 +862,18 @@ def is_cache_buster(names: list[str]) -> bool:
     return bool(names) and all(n.lower() in CACHE_BUSTER_PARAMS for n in names)
 
 
+def is_versioned_asset(url: str) -> bool:
+    """Recognize static asset build IDs without suppressing dynamic ?id= targets."""
+    p = urlsplit(url)
+    if not p.path.lower().endswith((".js", ".mjs", ".css", ".map", ".woff", ".woff2")):
+        return False
+    pairs = parse_qsl(p.query, keep_blank_values=True)
+    return bool(pairs) and all(
+        name.lower() in CACHE_BUSTER_PARAMS
+        or (name.lower() == "id" and re.fullmatch(r"[a-fA-F0-9]{6,128}", value))
+        for name, value in pairs)
+
+
 # gau/wayback return URLs whose VALUES already carry other researchers' payloads
 # (id=0+and+1=1--[True], tfSearch=<script>...). Feeding those to sqlmap/dalfox makes
 # them refuse ("tainted parameter values"), so we reset tainted values to a benign one.
@@ -915,6 +942,8 @@ PYTHON_PACKAGES: dict[str, tuple[str, str]] = {
     "playwright": ("playwright", "playwright>=1.48.0"),
     "rich": ("rich", "rich>=13.7.0"),
 }
+if os.name == "nt":
+    PYTHON_PACKAGES["pyreadline3"] = ("readline", "pyreadline3>=3.5.6")
 
 
 def ensure_tool_paths() -> None:
@@ -1101,6 +1130,8 @@ def required_tools_for_args(a) -> list[str]:
             for s in getattr(a, "scan_tools", None) or sorted(EXECUTABLE_SCAN_TOOLS):
                 if s in EXECUTABLE_SCAN_TOOLS:
                     needed.append(s)
+    if "commix" in needed and os.name == "nt":
+        needed.append("pyreadline3")
     return list(dict.fromkeys(needed))
 
 
@@ -1187,7 +1218,7 @@ def score(url: str) -> tuple[int, str]:
     categories = [name for name, (rx, _) in CATEGORIES.items() if rx.search(p.path)]
     base = max((v for name, (_, v) in CATEGORIES.items() if name in categories), default=10)
     names = query_param_names(p.query) if p.query else []
-    cache_bust = is_cache_buster(names)
+    cache_bust = is_cache_buster(names) or is_versioned_asset(url)
     if cache_bust:
         categories.append("cache_buster")
     if p.query and not cache_bust:
@@ -1536,8 +1567,9 @@ class Recon:
         self.active_procs.clear()
         clients = [self.client, self.passive_client, *self.origin_clients.values()]
         try:
-            for client in clients:
-                await client.aclose()
+            # Close every client even if one raises/times out (a failed socket-pool
+            # teardown must not leak the remaining clients).
+            await asyncio.gather(*(c.aclose() for c in clients), return_exceptions=True)
         finally:
             self.store.conn.close()
 
@@ -1595,6 +1627,12 @@ class Recon:
 
     async def ensure_tool(self, tool_name: str) -> bool:
         ensure_tool_paths()
+        if tool_name == "commix" and os.name == "nt" and importlib.util.find_spec("readline") is None:
+            if not getattr(self.a, "auto_install", False) or not await asyncio.to_thread(
+                install_missing_tool, "pyreadline3", self.a.tool_timeout
+            ):
+                LOG.warning("commix needs pyreadline3 on Windows; skipped")
+                return False
         if shutil.which(tool_name):
             return True
         if getattr(self.a, "auto_install", False):
@@ -1613,7 +1651,7 @@ class Recon:
         proc = None
         try:
             with path.open("wb") as stdout, errpath.open("wb") as stderr:
-                proc = await asyncio.create_subprocess_exec(*argv, stdout=stdout, stderr=stderr,
+                proc = await asyncio.create_subprocess_exec(*tool_process_argv(argv), stdout=stdout, stderr=stderr,
                     **({"start_new_session": True} if os.name == "posix" else {}))
                 self.active_procs.add(proc)
                 try:
@@ -1796,6 +1834,10 @@ class Recon:
         if host in self.dns_ok:
             return self.dns_ok[host]
         async with self.dns_sem:
+            # Re-check: concurrent coroutines for the same host may have resolved it
+            # while we waited on the semaphore — avoid duplicate getaddrinfo calls.
+            if host in self.dns_ok:
+                return self.dns_ok[host]
             try:
                 records = await asyncio.wait_for(
                     asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM),
@@ -1930,6 +1972,12 @@ class Recon:
     def extract(self, url: str, content_type: str, payload: bytes):
         ct = content_type.lower()
         path = urlsplit(url).path.lower()
+        looks_html = "html" in ct or payload[:128].lstrip().lower().startswith(
+            (b"<!doctype html", b"<html", b"<head", b"<body"))
+        if path.endswith((".js", ".mjs", ".map")) and looks_html:
+            # SPA fallbacks often return index.html for nonexistent assets.
+            # Parsing these as bundles creates imaginary routes and recursive paths.
+            return
         if ("javascript" in ct or path.endswith((".js", ".mjs"))) and not url.endswith(".map"):
             self.analyze_js(url, payload.decode("utf-8", "replace"))
             return
@@ -2124,9 +2172,10 @@ class Recon:
             return
         infile = self.tool_dir / "katana-input.txt"
         infile.write_text("\n".join(roots) + "\n", encoding="utf8")
+        # NOTE: this runs only when no --exclude/--exclude-path is set (guarded at the
+        # top of the function), so the exclusion regex is just the built-in unsafe-verb
+        # denylist — never user path exclusions, which the early return already handled.
         exclude_regex = r"(?i)/(?:logout|signout|delete|remove|destroy|shutdown|reboot)(?:/|\?|$)"
-        if self.a.exclude_path:
-            exclude_regex = exclude_regex + "|(?:" + "|".join(re.escape(p) for p in self.a.exclude_path) + ")"
         cmd = [
             "katana",
             "-list",
@@ -2188,7 +2237,10 @@ class Recon:
             )
             if urlsplit(r[0]).path == "/"
         ]
-        for origin in dict.fromkeys(origins):
+        # Cap hosts so the first few subdomains don't drain the global probe budget
+        # and starve the rest (ffuf already caps via --max-ffuf-hosts).
+        origins = list(dict.fromkeys(origins))[: self.a.max_fuzz_hosts]
+        for origin in origins:
             if self.probed + 2 >= self.a.max_probes or self.gate.count + 2 >= self.a.max_requests:
                 break
             await self.calibrate_soft404(origin)
@@ -2469,7 +2521,11 @@ class Recon:
                     continue
                 except Exception as exc:
                     LOG.debug("CNAME target lookup inconclusive: %s", type(exc).__name__)
+            # Many dangling services (S3 website endpoints, legacy hosts) answer only
+            # over HTTP, so fall back to http:// when HTTPS has no usable body.
             res = await self.raw_get("https://" + h + "/")
+            if not res or "body" not in res:
+                res = await self.raw_get("http://" + h + "/")
             if not res or "body" not in res:
                 continue
             for service, rx in TAKEOVER_FINGERPRINTS:
@@ -2489,6 +2545,7 @@ class Recon:
             "SELECT url, body_hash FROM urls WHERE checked=1 AND status IN (401,403) ORDER BY priority DESC LIMIT ?",
             (self.a.bypass_limit,),
         ).fetchall()
+        origin_hashes = {}
         for url, forbidden_hash in rows:
             p = urlsplit(url)
             path = p.path or "/"
@@ -2501,7 +2558,12 @@ class Recon:
             for name in ("X-Original-URL", "X-Rewrite-URL"):
                 attempts.append((origin, name, {name: path}))
             for suffix in BYPASS_PATH_SUFFIXES:
-                candidate = self.scope.url(path.rstrip("/") + suffix if suffix.startswith("/") else path + suffix, base=origin)
+                raw = (path.rstrip("/") + suffix) if suffix.startswith("/") else (path + suffix)
+                # Keep the original query — a protected endpoint may need its params
+                # (/admin/console?panel=main) or the probe just hits a 404 and lies.
+                if p.query and "?" not in suffix:
+                    raw = raw + "?" + p.query
+                candidate = self.scope.url(raw, base=origin)
                 if candidate and candidate != url:
                     attempts.append((candidate, "path:" + suffix, None))
             for target, technique, headers in attempts:
@@ -2510,6 +2572,18 @@ class Recon:
                 res = await self.raw_get(target, headers)
                 if (res and 200 <= res.get("status", 999) < 300 and res.get("bytes", 0) > 0
                         and not res.get("truncated") and res.get("body_hash") != forbidden_hash):
+                    if target != url:
+                        if origin not in origin_hashes:
+                            control = self.store.conn.execute(
+                                "SELECT body_hash FROM urls WHERE url=? AND checked=1 AND status BETWEEN 200 AND 299",
+                                (origin,)).fetchone()
+                            if control:
+                                origin_hashes[origin] = control[0]
+                            else:
+                                baseline = await self.raw_get(origin)
+                                origin_hashes[origin] = (baseline or {}).get("body_hash")
+                        if res["body_hash"] == origin_hashes[origin]:
+                            continue
                     self.add_finding("bypass",
                         {"url": url, "technique": technique, "target": target, "status": res["status"],
                          "bytes": res.get("bytes"), "body_hash": res.get("body_hash"),
@@ -2591,23 +2665,19 @@ class Recon:
                     return False
                 return bool(ra.get("body_hash")) and ra.get("body_hash") == rb.get("body_hash")
 
-            # A public API returning 200 alone is not an authorization finding.
-            # Horizontal access: two distinct identities get the identical resource
+            # Horizontal access signal: two distinct accounts get the IDENTICAL 2xx
+            # resource AND that body is not what the anonymous client sees. The anon
+            # gate is essential — a public page (/, /about) is byte-identical for every
+            # identity and is NOT an authorization flaw. Only gated content that two
+            # accounts share is a candidate BOLA / shared-object leak.
             for i in range(len(labels)):
                 for j in range(i + 1, len(labels)):
                     a, b = labels[i], labels[j]
-                    if ok(a) and ok(b) and same(a, b):
+                    if ok(a) and ok(b) and same(a, b) and not same(a, "anon"):
                         self.add_finding("bola",
                             {"url": url, "type": "cross_identity_identical", "identities": [a, b],
-                             "detail": "same 2xx body under different accounts — verify object ownership"}
+                             "detail": "same gated 2xx body under different accounts (differs from anonymous) — verify object ownership"}
                         )
-            # Identity sees anon-identical response (token ignored) OR vice-versa
-            for a in labels:
-                if ok(a) and ok("anon") and same(a, "anon"):
-                    self.add_finding("bola",
-                        {"url": url, "type": "auth_not_enforced", "identities": [a, "anon"],
-                         "detail": "authenticated and anonymous responses identical"}
-                    )
 
     def add_finding(self, kind: str, evidence: dict) -> None:
         target = {"takeover": self.takeover_hits, "bypass": self.bypass_hits, "bola": self.bola_findings}[kind]
@@ -2723,7 +2793,9 @@ class Recon:
         }
         atomic_text(self.out / "summary.json", json.dumps(summary, indent=2, ensure_ascii=False))
         # Always write a standalone interactive visual HTML report in the output folder
-        static_state = json.dumps(self.dashboard_state(), ensure_ascii=False)
+        static_state = (json.dumps(self.dashboard_state(), ensure_ascii=False)
+                        .replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
+                        .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
         static_html = DASHBOARD_HTML.replace(
             "<script>",
             f"<script>window.__STATIC_STATE__ = {static_state};\n",
@@ -2748,6 +2820,7 @@ class Recon:
         if self.permitted_url(url) is None:
             raise ValueError("scanner target blocked by policy")
         delay = round(1.0 / self.a.rate, 3)
+        integer_delay = max(1, math.ceil(1.0 / self.a.rate))
         t = self.a.timeout
         prof = SCAN_PROFILES[self.a.scan_profile][tool]
         headers = self.headers_for(url)
@@ -2761,11 +2834,11 @@ class Recon:
             return argv
         if tool == "ghauri":
             return ["ghauri", "-u", url, "--batch", "--level", str(prof["level"]), "--confirm",
-                    "--threads", str(threads), "--timeout", str(t), "--delay", str(delay),
+                    "--threads", str(threads), "--timeout", str(t), "--delay", str(integer_delay),
                     "--headers", bulk_headers]
         if tool == "commix":
             return ["commix", "--batch", "-u", url, "--level", str(prof["level"]), f"--timeout={t}",
-                    "--delay", str(delay), "--ignore-redirects", "--headers", bulk_headers]
+                    "--delay", str(integer_delay), "--ignore-redirects", "--headers", bulk_headers]
         if tool == "dalfox":
             argv = ["dalfox", "url", url, "--worker", str(threads), "--delay", str(int(delay * 1000)),
                     "--timeout", str(t), "--format", "jsonl", "--output", str(scan_dir / f"dalfox_{idx}.jsonl")]
@@ -2862,7 +2935,7 @@ class Recon:
         for url in rows:
             if len(plan) >= self.a.scan_plan_limit:
                 break
-            if self.permitted_url(url) is None or self.is_soft404(url):
+            if self.permitted_url(url) is None or self.is_soft404(url) or is_versioned_asset(url):
                 continue
             hits, names = self.classify_url(url)
             if not hits:
@@ -3084,6 +3157,18 @@ class Recon:
                     ui_event("VISUAL-UI", f"Dashboard estático salvo em: [bold white]{self.out / 'dashboard.html'}[/bold white]", C_OK)
 
 
+def tool_process_argv(argv: list[str]) -> list[str]:
+    """Launch simple Python BAT shims without cmd.exe interpreting URL metacharacters."""
+    executable = shutil.which(argv[0])
+    if os.name != "nt" or not executable or Path(executable).suffix.lower() not in {".bat", ".cmd"}:
+        return list(argv)
+    for line in Path(executable).read_text(encoding="utf8", errors="replace").splitlines():
+        match = re.fullmatch(r'\s*@?python(?:\.exe)?\s+"([^"\r\n]+\.py)"\s+%\*\s*', line, re.I)
+        if match and Path(match.group(1)).is_file():
+            return [sys.executable, match.group(1), *argv[1:]]
+    raise OSError("Unsupported batch launcher; install a native executable or simple Python shim")
+
+
 def apply_full_preset(a, argv: list[str]) -> None:
     """Expand defaults only: an explicit operator limit always wins."""
     if not a.full:
@@ -3165,6 +3250,7 @@ def build_parser():
     p.add_argument("--max-ffuf-hosts", type=int, default=10)
     p.add_argument("--wordlist")
     p.add_argument("--max-fuzz-words", type=int, default=500)
+    p.add_argument("--max-fuzz-hosts", type=int, default=10, help="max hosts the internal wordlist fuzzer touches (budget guard)")
     p.add_argument("--scanners", nargs="+", choices=["nuclei", "dalfox", "sqlmap", "ghauri", "commix"])
     p.add_argument("--gitleaks", action="store_true", help="scan downloaded JavaScript files offline")
     p.add_argument("--trufflehog", action="store_true", help="scan downloaded JavaScript files offline without API verification")
@@ -3254,6 +3340,7 @@ def main():
         and a.max_pages >= 1
         and a.max_crawl_hosts >= 1
         and a.max_fuzz_words >= 1
+        and a.max_fuzz_hosts >= 1
         and a.max_ffuf_hosts >= 1
         and a.render_wait >= 0
     ):

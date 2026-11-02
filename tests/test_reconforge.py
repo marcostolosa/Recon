@@ -15,6 +15,7 @@ from reconforge import (
     Throttle,
     build_parser,
     apply_full_preset,
+    tool_process_argv,
     check_system_tools,
     hostnorm,
     injection_classes,
@@ -493,6 +494,89 @@ class TestScanTargetingFixes(unittest.TestCase):
         self.assertEqual(a.max_probes, 4000)
         self.assertEqual(a.max_requests, 6000)
         self.assertEqual(a.out, "reconforge-output")
+
+    def test_python_batch_shim_does_not_invoke_command_shell(self):
+        import sys
+        with tempfile.TemporaryDirectory() as td:
+            script = Path(td) / 'tool.py'
+            script.write_text('print("ok")', encoding='utf8')
+            shim = Path(td) / 'tool.bat'
+            shim.write_text('@echo off\npython "' + str(script) + '" %*\n', encoding='utf8')
+            with patch('reconforge.os.name', 'nt'), patch('reconforge.shutil.which', return_value=str(shim)):
+                argv = tool_process_argv(['tool', '-u', 'https://example.com/?a=1&b=2'])
+            self.assertEqual(argv, [sys.executable, str(script), '-u', 'https://example.com/?a=1&b=2'])
+
+
+class TestPipelineLogicFixes(unittest.TestCase):
+    def test_pinned_transport_caches_dns(self):
+        import httpx
+        import reconforge
+
+        async def run():
+            loop = asyncio.get_running_loop()
+            calls = []
+
+            async def fake_gai(host, port, **k):
+                calls.append(host)
+                return [(2, 1, 6, "", ("1.2.3.4", port or 0))]
+
+            loop.getaddrinfo = fake_gai
+            t = reconforge.PinnedTransport(allow_private=False, timeout=5, concurrency=5, dns_ttl=300)
+            req = httpx.Request("GET", "https://example.com/")
+            ips1 = await t._resolve("example.com", 443, req)
+            ips2 = await t._resolve("example.com", 443, req)
+            self.assertEqual(ips1, ["1.2.3.4"])
+            self.assertEqual(ips2, ["1.2.3.4"])
+            self.assertEqual(len(calls), 1)  # second call served from cache
+
+        asyncio.run(run())
+
+    def test_max_fuzz_hosts_flag(self):
+        self.assertEqual(build_parser().parse_args(["example.com"]).max_fuzz_hosts, 10)
+
+    def test_takeover_falls_back_to_http(self):
+        with tempfile.TemporaryDirectory() as td:
+            recon = Recon(build_parser().parse_args(["example.com", "--out", td]))
+            recon.a.takeover = True
+            recon.store.host("dangling.example.com", "seed")
+            recon.store.commit()
+            tried = []
+
+            async def none_cname(h):
+                return None
+
+            async def fake_get(u, *a, **k):
+                tried.append(u)
+                if u.startswith("https://"):
+                    return None  # TLS/443 unavailable
+                return {"status": 404, "body": b"There isn't a GitHub Pages site here", "body_hash": "h", "bytes": 42}
+
+            recon._cname = none_cname
+            recon.raw_get = fake_get
+            asyncio.run(recon.takeover())
+            self.assertTrue(any(u.startswith("http://") for u in tried))  # fallback used
+            self.assertTrue(any(f.get("service") == "github_pages" for f in recon.takeover_hits))
+            recon.store.conn.close()
+
+    def test_bypass_403_preserves_query(self):
+        with tempfile.TemporaryDirectory() as td:
+            recon = Recon(build_parser().parse_args(["example.com", "--bypass-403", "--out", td]))
+            u = "https://example.com/admin?panel=main"
+            recon.store.url(u, "seed", probe=True)
+            recon.store.finish(u, {"status": 403, "body_hash": "FORBID"})
+            recon.store.commit()
+            targets = []
+
+            async def fake_get(t, *a, **k):
+                targets.append(t)
+                return {"status": 404, "body_hash": "x", "bytes": 1}
+
+            recon.raw_get = fake_get
+            asyncio.run(recon.bypass_403())
+            path_targets = [t for t in targets if t != u]
+            self.assertTrue(path_targets)
+            self.assertTrue(any("panel=main" in t for t in path_targets))  # query carried into path tricks
+            recon.store.conn.close()
 
 
 if __name__ == "__main__":

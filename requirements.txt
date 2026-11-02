@@ -4,6 +4,7 @@ playwright>=1.48.0
 # Modern terminal UI (banner, colored logs, summary tables). Falls back to plain
 # logging if absent.
 rich>=13.7.0
+pyreadline3>=3.5.6; sys_platform == "win32"
 # Optional: enables CNAME / NXDOMAIN signals in the subdomain-takeover pass.
 # Without it, takeover detection falls back to HTTP body fingerprints only.
 dnspython>=2.4.0

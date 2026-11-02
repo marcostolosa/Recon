@@ -106,6 +106,11 @@ python reconforge.py example.com --full
 python reconforge.py example.com --full --visual
 ```
 
+Para ativar também Amass e a execução do plano de injeção, use `--full --visual --amass --auto-scan`.
+Inclua Nuclei com `--scanners nuclei --nuclei-templates <templates-revisados>`; ele não é ativado automaticamente pelo preset.
+O preset respeita `--scan-profile`, limites e `--out` explícitos. `--no-subdomains` restringe o full ao hostname exato.
+Não é necessário repetir SQLMap/Ghauri/Commix/Dalfox em `--scanners` quando `--auto-scan` já faz o roteamento: isso pode duplicar testes.
+
 ### 1. Recon Passivo (Zero Tráfego no Alvo)
 Coleta apenas via Certificate Transparency (`crt.sh`, `CertSpotter`), `subfinder`, `amass` e histórico (`gau`/Wayback):
 ```bash
