@@ -14,7 +14,7 @@
 **Advanced Autonomous Attack Surface Reconnaissance & Intelligence Pipeline for Bug Bounty**
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.14-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![Tests Passing](https://img.shields.io/badge/Tests-46%20Passed-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](#-testes-automatizados)
+[![Tests Passing](https://img.shields.io/badge/Tests-49%20Passed-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](#-testes-automatizados)
 [![Architecture Async](https://img.shields.io/badge/Architecture-AsyncIO%20%2B%20SQLite%20WAL-8A2BE2?style=for-the-badge&logo=databricks&logoColor=white)](#-arquitetura-e-fluxo-de-dados)
 [![Security Hardened](https://img.shields.io/badge/Security-Strict%20Scope%20%26%20DNS%20Pinning-E63946?style=for-the-badge&logo=auth0&logoColor=white)](#-defesas-de-segurança-e-integridade-operacional)
 [![License MIT](https://img.shields.io/badge/License-MIT-0077B6?style=for-the-badge)](LICENSE)
@@ -123,13 +123,18 @@ Para capturar tráfego de SPAs e sites que renderizam links via client-side Java
 playwright install chromium
 ```
 
-### 3. (Opcional) Ferramentas Externas
-O ReconForge opera de forma **100% autônoma** com seu motor nativo. Caso queira enriquecer a coleta com utilitários externos populares no ecossistema de Bug Bounty, instale-os no seu `PATH`:
-- **Enumeração & Crawling:** `subfinder`, `amass`, `gau`, `katana`, `ffuf`.
-- **Scanners:** `sqlmap`, `ghauri`, `commix`, `dalfox`, `nuclei`.
-- **Auditoria de Segredos:** `gitleaks`, `trufflehog`.
+### 3. Verificação e Instalação Automática de Ferramentas Externas
+O ReconForge possui um **gerenciador integrado de ferramentas** que verifica automaticamente se os utilitários necessários (`subfinder`, `amass`, `gau`, `katana`, `ffuf`, `nuclei`, `dalfox`, `sqlmap`, `ghauri`, `commix`, `gitleaks`, `trufflehog`, `dnspython` e `playwright`) estão presentes no sistema e **instala automaticamente** (via `go install` ou `pip`) caso estejam ausentes:
 
-> *Nota:* Caso alguma ferramenta externa não esteja presente no sistema, o ReconForge a ignora automaticamente sem interromper a execução.
+```bash
+# Verificar status de todas as ferramentas no sistema:
+python reconforge.py --check-tools
+
+# Instalar automaticamente todas as ferramentas externas suportadas:
+python reconforge.py --install-tools
+```
+
+> *Nota:* Por padrão na CLI (`--auto-install`), o ReconForge checa e instala sob demanda qualquer ferramenta exigida pelas flags ativas da execução. Use `--no-auto-install` caso deseje desabilitar a instalação automática.
 
 ---
 

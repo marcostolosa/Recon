@@ -4,6 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from unittest.mock import patch
+
 from reconforge import (
     TAKEOVER_FINGERPRINTS,
     HTMLLinks,
@@ -12,7 +14,10 @@ from reconforge import (
     Store,
     Throttle,
     build_parser,
+    check_system_tools,
     hostnorm,
+    install_missing_tool,
+    required_tools_for_args,
     score,
 )
 
@@ -257,6 +262,40 @@ class TestReconForge(unittest.TestCase):
             self.assertIn("--level=1", argv)
             self.assertNotIn("--random-agent", argv)
             safe.store.conn.close()
+
+    def test_18_check_and_required_tools(self):
+        report = check_system_tools()
+        self.assertIn("subfinder", report)
+        self.assertIn("sqlmap", report)
+        self.assertIn("dnspython", report)
+        args = build_parser().parse_args(["example.com", "--katana", "--ffuf", "--scanners", "sqlmap"])
+        needed = required_tools_for_args(args)
+        self.assertIn("subfinder", needed)
+        self.assertIn("gau", needed)
+        self.assertIn("katana", needed)
+        self.assertIn("ffuf", needed)
+        self.assertIn("sqlmap", needed)
+        self.assertIn("dnspython", needed)
+
+    def test_19_install_missing_tool_invokes_installer(self):
+        calls = []
+
+        def fake_which(cmd):
+            if cmd == "go":
+                return "/usr/bin/go"
+            if cmd == "subfinder":
+                return "/home/user/go/bin/subfinder" if calls else None
+            return None
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            return None
+
+        with patch("reconforge.shutil.which", side_effect=fake_which), patch("reconforge.subprocess.run", side_effect=fake_run):
+            ok = install_missing_tool("subfinder", timeout=30)
+            self.assertTrue(ok)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][1], "install")
 
 
 if __name__ == "__main__":

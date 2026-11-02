@@ -13,6 +13,7 @@ from collections import defaultdict
 import csv
 import hashlib
 from html.parser import HTMLParser
+import importlib.util
 import ipaddress
 import json
 import logging
@@ -25,6 +26,9 @@ import shlex
 import shutil
 import socket
 import sqlite3
+import subprocess
+import sys
+import sysconfig
 import time
 from urllib.parse import parse_qsl, unquote, urljoin, urlsplit, urlunsplit
 import xml.etree.ElementTree as ET
@@ -299,6 +303,201 @@ SCAN_PROFILES = {
         "dalfox": {"worker": 50, "mining": True, "deep_domxss": True},
     },
 }
+
+EXTERNAL_TOOLS: dict[str, tuple[str, str]] = {
+    "subfinder": ("go", "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"),
+    "amass": ("go", "github.com/owasp-amass/amass/v4/...@master"),
+    "gau": ("go", "github.com/lc/gau/v2/cmd/gau@latest"),
+    "katana": ("go", "github.com/projectdiscovery/katana/cmd/katana@latest"),
+    "ffuf": ("go", "github.com/ffuf/ffuf/v2@latest"),
+    "nuclei": ("go", "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"),
+    "dalfox": ("go", "github.com/hahwul/dalfox/v2@latest"),
+    "gitleaks": ("go", "github.com/zricethezav/gitleaks/v8@latest"),
+    "trufflehog": ("go", "github.com/trufflesecurity/trufflehog/v3@latest"),
+    "sqlmap": ("pip", "sqlmap"),
+    "ghauri": ("pip", "git+https://github.com/r0oth3x49/ghauri.git"),
+    "commix": ("pip", "git+https://github.com/commixproject/commix.git"),
+}
+
+PYTHON_PACKAGES: dict[str, tuple[str, str]] = {
+    "dnspython": ("dns", "dnspython>=2.4.0"),
+    "playwright": ("playwright", "playwright>=1.48.0"),
+}
+
+
+def ensure_tool_paths() -> None:
+    """Ensure Go and Python user binary directories are on PATH."""
+    candidates = [
+        Path.home() / "go" / "bin",
+        Path(sys.executable).resolve().parent,
+        Path(sys.executable).resolve().parent / "Scripts",
+        Path(sys.executable).resolve().parent / "bin",
+    ]
+    for scheme in (None, f"{os.name}_user", "posix_user"):
+        try:
+            scripts_dir = sysconfig.get_path("scripts", scheme) if scheme else sysconfig.get_path("scripts")
+            if scripts_dir:
+                candidates.append(Path(scripts_dir))
+        except (KeyError, ValueError):
+            pass
+    gopath = os.environ.get("GOPATH")
+    if gopath:
+        candidates.insert(0, Path(gopath) / "bin")
+    current = os.environ.get("PATH", "")
+    parts = current.split(os.pathsep) if current else []
+    norm_existing = { os.path.normcase(os.path.normpath(p)) for p in parts if p }
+    added = []
+    for cand in candidates:
+        s = str(cand)
+        norm = os.path.normcase(os.path.normpath(s))
+        if cand.is_dir() and norm not in norm_existing:
+            added.append(s)
+            norm_existing.add(norm)
+    if added:
+        os.environ["PATH"] = os.pathsep.join(added + parts)
+
+
+def check_system_tools() -> dict[str, dict]:
+    """Return installation status of all optional external CLI tools and Python packages."""
+    ensure_tool_paths()
+    report: dict[str, dict] = {}
+    for pkg_name, (mod_name, spec) in PYTHON_PACKAGES.items():
+        spec_found = importlib.util.find_spec(mod_name) is not None
+        report[pkg_name] = {
+            "kind": "python",
+            "installed": spec_found,
+            "path": mod_name if spec_found else None,
+            "installer": "pip",
+            "spec": spec,
+        }
+    for tool_name, (installer, spec) in EXTERNAL_TOOLS.items():
+        found = shutil.which(tool_name)
+        report[tool_name] = {
+            "kind": "binary",
+            "installed": bool(found),
+            "path": found,
+            "installer": installer,
+            "spec": spec,
+        }
+    return report
+
+
+def install_missing_tool(name: str, timeout: int = 300) -> bool:
+    """Check if `name` is installed; if not, install it via Go or pip."""
+    ensure_tool_paths()
+    if name in PYTHON_PACKAGES:
+        mod_name, spec = PYTHON_PACKAGES[name]
+        if importlib.util.find_spec(mod_name) is not None:
+            return True
+        LOG.info("installing missing Python package %s (%s)...", name, spec)
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--quiet", spec],
+                check=True,
+                timeout=timeout,
+            )
+            if name == "playwright":
+                subprocess.run(
+                    [sys.executable, "-m", "playwright", "install", "chromium"],
+                    check=False,
+                    timeout=timeout,
+                )
+            return importlib.util.find_spec(mod_name) is not None
+        except (OSError, subprocess.SubprocessError) as exc:
+            LOG.warning("failed to install Python package %s: %s", name, exc)
+            return False
+
+    if shutil.which(name):
+        return True
+    if name not in EXTERNAL_TOOLS:
+        return False
+
+    installer, spec = EXTERNAL_TOOLS[name]
+    if installer == "go":
+        go_bin = shutil.which("go")
+        if not go_bin:
+            LOG.warning("cannot auto-install %s: 'go' compiler not found in PATH", name)
+            return False
+        LOG.info("installing missing tool %s via 'go install %s'...", name, spec)
+        try:
+            env = os.environ.copy()
+            env.setdefault("CGO_ENABLED", "0")
+            subprocess.run(
+                [go_bin, "install", spec],
+                check=True,
+                timeout=timeout,
+                env=env,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            LOG.warning("failed to install %s via go: %s", name, exc)
+            return False
+    elif installer == "pip":
+        LOG.info("installing missing tool %s via pip (%s)...", name, spec)
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--quiet", spec],
+                check=True,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            LOG.warning("failed to install %s via pip: %s", name, exc)
+            return False
+
+    ensure_tool_paths()
+    installed_path = shutil.which(name)
+    if installed_path:
+        LOG.info("tool %s installed at %s", name, installed_path)
+        return True
+    LOG.warning("tool %s still not found in PATH after installation attempt", name)
+    return False
+
+
+def required_tools_for_args(a) -> list[str]:
+    """Return the list of external tools and Python packages needed for the active CLI flags."""
+    needed: list[str] = []
+    if not getattr(a, "no_enum", False):
+        if getattr(a, "subfinder", False):
+            needed.append("subfinder")
+        if getattr(a, "amass", False):
+            needed.append("amass")
+        if getattr(a, "gau", False):
+            needed.append("gau")
+    if not getattr(a, "passive_only", False):
+        if getattr(a, "takeover", False):
+            needed.append("dnspython")
+        if getattr(a, "katana", False):
+            needed.append("katana")
+        if getattr(a, "browser", False):
+            needed.append("playwright")
+        if getattr(a, "ffuf", False):
+            needed.append("ffuf")
+        if getattr(a, "gitleaks", False):
+            needed.append("gitleaks")
+        if getattr(a, "trufflehog", False):
+            needed.append("trufflehog")
+        for s in getattr(a, "scanners", None) or []:
+            needed.append(s)
+        if getattr(a, "auto_scan", False):
+            for s in getattr(a, "scan_tools", None) or sorted(EXECUTABLE_SCAN_TOOLS):
+                if s in EXECUTABLE_SCAN_TOOLS:
+                    needed.append(s)
+    return list(dict.fromkeys(needed))
+
+
+def ensure_run_tools(tools: list[str], auto_install: bool = True, timeout: int = 300) -> dict[str, bool]:
+    """Check `tools` and optionally install any that are missing."""
+    ensure_tool_paths()
+    results: dict[str, bool] = {}
+    for name in dict.fromkeys(tools):
+        if name in PYTHON_PACKAGES:
+            mod_name, _ = PYTHON_PACKAGES[name]
+            ok = importlib.util.find_spec(mod_name) is not None
+        else:
+            ok = bool(shutil.which(name))
+        if not ok and auto_install:
+            ok = install_missing_tool(name, timeout=timeout)
+        results[name] = ok
+    return results
 
 
 def hostnorm(host: str) -> str:
@@ -692,8 +891,16 @@ class Recon:
         if self.scope.allowed_host(clean):
             self.store.host(clean, source)
 
+    async def ensure_tool(self, tool_name: str) -> bool:
+        ensure_tool_paths()
+        if shutil.which(tool_name):
+            return True
+        if getattr(self.a, "auto_install", False):
+            return await asyncio.to_thread(install_missing_tool, tool_name, self.a.tool_timeout)
+        return False
+
     async def command(self, name: str, argv: list[str], timeout: int | None = None) -> Path | None:
-        if not shutil.which(argv[0]):
+        if not await self.ensure_tool(argv[0]):
             LOG.warning("%s missing in PATH; skipped", argv[0])
             return None
         path = self.tool_dir / f"{name}.stdout"
@@ -1716,7 +1923,7 @@ class Recon:
             elif tool in EXECUTABLE_SCAN_TOOLS:
                 if not params:
                     continue
-                if not shutil.which(tool):
+                if not await self.ensure_tool(tool):
                     LOG.warning("%s missing in PATH; skipped", tool)
                     continue
                 for i, u in enumerate(params):
@@ -1812,7 +2019,7 @@ class Recon:
         for tool in sorted(tool_targets):
             if tool not in EXECUTABLE_SCAN_TOOLS:
                 continue
-            if not shutil.which(tool):
+            if not await self.ensure_tool(tool):
                 LOG.warning("auto-scan: %s not in PATH; skipped (%d targets)", tool, len(set(tool_targets[tool])))
                 continue
             for i, url in enumerate(dict.fromkeys(tool_targets[tool])):
@@ -1891,7 +2098,11 @@ class Recon:
 
 def build_parser():
     p = argparse.ArgumentParser(description="Scoped and resumable reconnaissance with optional active scanners")
-    p.add_argument("domain", help="authorized apex hostname, without scheme")
+    p.add_argument("domain", nargs="?", help="authorized apex hostname, without scheme")
+    p.add_argument("--check-tools", action="store_true", help="check installed external tools and Python packages")
+    p.add_argument("--install-tools", action="store_true", help="check and install missing external tools and Python packages")
+    p.add_argument("--auto-install", action="store_true", default=None, help="automatically check and install missing tools needed for the active flags (default: enabled on CLI)")
+    p.add_argument("--no-auto-install", dest="auto_install", action="store_false", help="do not auto-install missing tools")
     p.add_argument("--subdomains", action="store_true", help="include *.domain only when explicitly in scope")
     p.add_argument("--exclude", action="append", default=[], help="exclude hostname and all its descendants")
     p.add_argument("--exclude-path", action="append", default=[], help="do not actively fetch this URL path prefix")
@@ -1975,10 +2186,32 @@ def build_parser():
 def main():
     a = build_parser().parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    ensure_tool_paths()
+    if a.check_tools:
+        report = check_system_tools()
+        for name, info in report.items():
+            status = f"OK ({info['path']})" if info["installed"] else f"MISSING (install via {info['installer']}: {info['spec']})"
+            LOG.info("tool %-12s : %s", name, status)
+        if not a.domain and not a.install_tools:
+            return
+    if a.install_tools:
+        all_names = list(PYTHON_PACKAGES) + list(EXTERNAL_TOOLS)
+        results = ensure_run_tools(all_names, auto_install=True, timeout=a.tool_timeout)
+        LOG.info("tool installation summary: %d/%d ready", sum(results.values()), len(results))
+        if not a.domain:
+            return
+    if not a.domain:
+        raise SystemExit("Domain is required unless --check-tools or --install-tools is used")
     try:
         a.domain = hostnorm(a.domain)
     except (ValueError, UnicodeError) as exc:
         raise SystemExit(f"Invalid domain: {exc}") from exc
+    if a.auto_install is None:
+        a.auto_install = True
+    if a.auto_install:
+        needed = required_tools_for_args(a)
+        if needed:
+            ensure_run_tools(needed, auto_install=True, timeout=a.tool_timeout)
     a.initial_probes = min(a.initial_probes, a.max_probes)
     a.max_body = max(1, min(a.max_body, 20_000_000))  # hard 20MB ceiling per response
     if not (
