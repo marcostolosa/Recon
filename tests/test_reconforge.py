@@ -16,7 +16,9 @@ from reconforge import (
     build_parser,
     check_system_tools,
     hostnorm,
+    injection_classes,
     install_missing_tool,
+    is_cache_buster,
     required_tools_for_args,
     score,
 )
@@ -296,6 +298,49 @@ class TestReconForge(unittest.TestCase):
             self.assertTrue(ok)
             self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0][1], "install")
+
+
+class TestScanTargetingFixes(unittest.TestCase):
+    def test_injectable_outranks_cache_buster_js(self):
+        # Bug B regression: a SQLi endpoint must outrank a cache-busted JS bundle,
+        # so the probe budget and scan planner reach it first.
+        inj_score, inj_tags = score("http://testphp.vulnweb.com/listproducts.php?cat=1")
+        js_score, js_tags = score("http://rest.vulnweb.com/docs/api_data.js?v=1596328976710")
+        self.assertIn("injectable", inj_tags)
+        self.assertIn("sqli", inj_tags)
+        self.assertIn("cache_buster", js_tags)
+        self.assertNotIn("javascript", js_tags)       # cache-buster suppresses JS bonus
+        self.assertNotIn("parameterized", js_tags)
+        self.assertGreater(inj_score, js_score)
+
+    def test_real_js_still_scores_as_javascript(self):
+        s, tags = score("http://example.com/static/app.js")
+        self.assertIn("javascript", tags)
+
+    def test_cache_buster_detection(self):
+        self.assertTrue(is_cache_buster(["v"]))
+        self.assertTrue(is_cache_buster(["_", "ts"]))
+        self.assertFalse(is_cache_buster(["cat"]))
+        self.assertFalse(is_cache_buster(["v", "cat"]))  # mixed → not pure cache-buster
+
+    def test_injection_classes_routing(self):
+        self.assertEqual(injection_classes(["cat"]), {"sqli"})
+        self.assertIn("cmdi", injection_classes(["cmd"]))
+        self.assertIn("xss", injection_classes(["search"]))
+        self.assertEqual(injection_classes(["v"]), set())
+
+    def test_scope_url_rejects_embedded_scheme_in_path(self):
+        sc = Scope("vulnweb.com", include_subdomains=True, excludes=[])
+        self.assertIsNone(sc.url("http://testphp.vulnweb.com/40http://testphp.vulnweb.com/AJAX/infoartist.php"))
+        # a normal path is still accepted
+        self.assertEqual(
+            sc.url("http://testphp.vulnweb.com/listproducts.php?cat=1"),
+            "http://testphp.vulnweb.com/listproducts.php?cat=1",
+        )
+
+    def test_dns_timeout_flag_default_and_validation(self):
+        a = build_parser().parse_args(["example.com"])
+        self.assertEqual(a.dns_timeout, 3)
 
 
 if __name__ == "__main__":

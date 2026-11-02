@@ -280,6 +280,27 @@ INJECTION_ROUTES = {
 # Tools the auto-scan path may actually execute (nuclei stays review-gated on templates/tags).
 EXECUTABLE_SCAN_TOOLS = {"sqlmap", "ghauri", "commix", "dalfox"}
 
+# Cache-busting / versioning params carry no injectable value. A URL whose params
+# are ALL in this set must not win probe priority or feed the scan planner, so
+# that `app.js?v=<timestamp>` never outranks `listproducts.php?cat=1`.
+CACHE_BUSTER_PARAMS = {
+    "v", "ver", "version", "t", "ts", "_", "cache", "nocache", "cachebuster",
+    "rev", "rnd", "rand", "r", "cb", "time", "timestamp", "hash", "build", "bust",
+}
+
+
+def query_param_names(query: str) -> list[str]:
+    return [k for k, _ in parse_qsl(query, keep_blank_values=True)]
+
+
+def injection_classes(names: list[str]) -> set[str]:
+    """Which injection classes the parameter NAMES route to (see INJECTION_ROUTES)."""
+    return {cls for cls, (rx, _) in INJECTION_ROUTES.items() if any(rx.fullmatch(n) for n in names)}
+
+
+def is_cache_buster(names: list[str]) -> bool:
+    return bool(names) and all(n.lower() in CACHE_BUSTER_PARAMS for n in names)
+
 # Scan depth profiles. Depth (coverage) is tuned here; speed is a separate axis
 # controlled by each tool; --concurrency also caps its configured worker count.
 # The built-in request budget does not cover external tools.
@@ -548,6 +569,10 @@ class Scope:
             path = p.path or "/"
             if "\\" in value or any(ord(c) < 32 or ord(c) == 127 for c in value):
                 return None
+            # An embedded scheme in the path (e.g. "/40http://host/...") is almost
+            # always mangled crawler/gau output, not a real endpoint — drop it.
+            if "://" in path:
+                return None
             return urlunsplit((p.scheme.lower(), h, path, query, ""))
         except (ValueError, UnicodeError, TypeError):
             return None
@@ -562,16 +587,28 @@ def score(url: str) -> tuple[int, str]:
     p = urlsplit(url)
     categories = [name for name, (rx, _) in CATEGORIES.items() if rx.search(p.path)]
     base = max((v for name, (_, v) in CATEGORIES.items() if name in categories), default=10)
-    if p.query:
+    names = query_param_names(p.query) if p.query else []
+    cache_bust = is_cache_buster(names)
+    if cache_bust:
+        categories.append("cache_buster")
+    if p.query and not cache_bust:
         base += 15
         categories.append("parameterized")
         if HIGH_VALUE_PARAMS.search(p.query):
             base += 20
             categories.append("high_value_param")
-    if p.path.endswith((".js", ".mjs", ".map")):
+        # Params that route to an injection class are the ones worth a scanner.
+        # Rank them above JS so the probe budget and scan planner reach them first.
+        inj = injection_classes(names)
+        if inj:
+            base += 40
+            categories.append("injectable")
+            categories.extend(sorted(inj))
+    # JS matters for secrets/endpoints, but a cache-busted bundle is noise, not a lead.
+    if p.path.endswith((".js", ".mjs", ".map")) and not cache_bust:
         base += 35
         categories.append("javascript")
-    return min(base, 100), ",".join(categories)
+    return min(base, 100), ",".join(dict.fromkeys(categories))
 
 
 class Store:
@@ -1069,7 +1106,7 @@ class Recon:
             try:
                 records = await asyncio.wait_for(
                     asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM),
-                    timeout=self.a.timeout,
+                    timeout=self.a.dns_timeout,
                 )
                 ips = {row[4][0] for row in records}
                 valid = bool(ips) and (self.a.allow_private or all(ipaddress.ip_address(i).is_global for i in ips))
@@ -1085,7 +1122,7 @@ class Recon:
             try:
                 rows = await asyncio.wait_for(
                     asyncio.get_running_loop().getaddrinfo(candidate, None, type=socket.SOCK_STREAM),
-                    timeout=self.a.timeout,
+                    timeout=self.a.dns_timeout,
                 )
                 observations.append(sorted({r[4][0] for r in rows}))
             except (OSError, asyncio.TimeoutError):
@@ -1557,7 +1594,7 @@ class Recon:
         except ImportError:
             return None
         try:
-            answer = await dns.asyncresolver.resolve(host, "CNAME", lifetime=self.a.timeout)
+            answer = await dns.asyncresolver.resolve(host, "CNAME", lifetime=self.a.dns_timeout)
             return str(answer[0].target).rstrip(".").lower() if answer else None
         except Exception:
             return None
@@ -1581,7 +1618,7 @@ class Recon:
             if cname:
                 # A timeout, private address or NoAnswer is not NXDOMAIN.
                 try:
-                    await dns.asyncresolver.resolve(cname, "A", lifetime=self.a.timeout)
+                    await dns.asyncresolver.resolve(cname, "A", lifetime=self.a.dns_timeout)
                 except dns.resolver.NXDOMAIN:
                     self.add_finding("takeover", {"host": h, "cname": cname, "service": None, "signal": "cname_nxdomain"})
                     continue
@@ -1943,18 +1980,25 @@ class Recon:
         """Classify live parameterized endpoints and propose which tool to run where.
         Always writes a reviewable plan (JSON + shell script). With --auto-scan it also
         launches the executable tools that are present in PATH."""
+        # Scan over a generous pool of live parameterized URLs (ordered by priority),
+        # not just the top scan_plan_limit: otherwise cache-busters / non-injectable
+        # params at the top of the ranking crowd out the injectable endpoints and the
+        # plan comes back empty. We stop once scan_plan_limit matches are collected.
+        pool = max(self.a.scan_plan_limit * 20, 500)
         rows = [
             r[0]
             for r in self.store.conn.execute(
                 "SELECT url FROM urls WHERE checked=1 AND status BETWEEN 200 AND 399 AND instr(url,'?')>0 "
                 "AND source!='soft404_control' ORDER BY priority DESC LIMIT ?",
-                (self.a.scan_plan_limit,),
+                (pool,),
             )
         ]
         allowed = set(self.a.scan_tools) if self.a.scan_tools else None
         plan: list[dict] = []
         tool_targets: dict[str, list[str]] = defaultdict(list)
         for url in rows:
+            if len(plan) >= self.a.scan_plan_limit:
+                break
             if self.permitted_url(url) is None or self.is_soft404(url):
                 continue
             hits, names = self.classify_url(url)
@@ -2131,6 +2175,7 @@ def build_parser():
     p.add_argument("--concurrency", type=int, default=5)
     p.add_argument("--dns-concurrency", type=int, default=15)
     p.add_argument("--timeout", type=int, default=12)
+    p.add_argument("--dns-timeout", type=int, default=3, help="per-host DNS resolution timeout (short: dead hosts must not stall probing)")
     p.add_argument("--max-body", type=int, default=5000000, help="response bytes read per HTTP/JS target (max 20MB)")
     p.add_argument("--tool-timeout", type=int, default=900)
     p.add_argument("--max-requests", type=int, default=6000)
@@ -2227,6 +2272,7 @@ def main():
         and a.scan_plan_limit >= 1
         and a.crawl_depth in range(1, 8)
         and a.timeout >= 1
+        and a.dns_timeout >= 1
         and a.tool_timeout >= 1
         and a.max_dns_words >= 1
         and a.max_import_lines >= 1
