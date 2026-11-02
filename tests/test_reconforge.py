@@ -383,6 +383,46 @@ class TestScanTargetingFixes(unittest.TestCase):
         finally:
             shutil.rmtree(td, ignore_errors=True)
 
+    def test_active_features_list(self):
+        from reconforge import _active_features
+        a = build_parser().parse_args([
+            "example.com", "--katana", "--bypass-403", "--auto-scan",
+            "--identity", "A:Authorization: Bearer tok",
+            "--scanners", "sqlmap", "dalfox",
+        ])
+        feats = _active_features(a)
+        self.assertIn("katana", feats)
+        self.assertIn("403-bypass", feats)
+        self.assertIn("auto-scan", feats)
+        self.assertIn("BOLA", feats)
+        self.assertIn("scanners:sqlmap+dalfox", feats)
+
+    def test_print_banner_and_summary_render_cleanly(self):
+        from reconforge import print_banner, print_summary
+        a = build_parser().parse_args(["example.com", "--subdomains"])
+        print_banner(a)
+        sample_summary = {
+            "scope": "example.com",
+            "subdomains_in_scope": 5,
+            "urls_in_scope": 42,
+            "alive_urls": 20,
+            "http_probes_run": 30,
+            "pending_urls": 12,
+            "http_requests_builtin": 35,
+            "manual_review_only": 2,
+            "takeover_candidates": 1,
+            "bypass_403_candidates": 0,
+            "bola_candidates": 2,
+            "secret_indicators_unverified": 3,
+            "scan_plan_endpoints": 4,
+        }
+        print_summary(sample_summary, Path("."))
+
+    def test_print_tools_table_renders_cleanly(self):
+        from reconforge import check_system_tools, print_tools_table
+        report = check_system_tools()
+        print_tools_table(report)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,7 @@
 **Advanced Autonomous Attack Surface Reconnaissance & Intelligence Pipeline for Bug Bounty**
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.14-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![Tests Passing](https://img.shields.io/badge/Tests-49%20Passed-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](#-testes-automatizados)
+[![Tests Passing](https://img.shields.io/badge/Tests-60%20Passed-2ea44f?style=for-the-badge&logo=githubactions&logoColor=white)](#-testes-automatizados)
 [![Architecture Async](https://img.shields.io/badge/Architecture-AsyncIO%20%2B%20SQLite%20WAL-8A2BE2?style=for-the-badge&logo=databricks&logoColor=white)](#-arquitetura-e-fluxo-de-dados)
 [![Security Hardened](https://img.shields.io/badge/Security-Strict%20Scope%20%26%20DNS%20Pinning-E63946?style=for-the-badge&logo=auth0&logoColor=white)](#-defesas-de-segurança-e-integridade-operacional)
 [![License MIT](https://img.shields.io/badge/License-MIT-0077B6?style=for-the-badge)](LICENSE)
@@ -290,12 +290,12 @@ O ReconForge foi submetido a uma rigorosa bateria de auditoria de segurança est
 O projeto conta com uma suíte de testes unitários e de integração de segurança abrangente, rodando offline em ambiente simulado:
 
 ```bash
-# Executar todos os 46 testes automatizados:
+# Executar todos os 60 testes automatizados:
 python -m unittest discover -s tests -v
 ```
 
 ```text
-Ran 46 tests in 2.628s
+Ran 60 tests in 3.5s
 OK
 ```
 
@@ -310,8 +310,9 @@ python audit_reconforge_offline.py
 
 - [x] Motor Python assíncrono modular com persistência SQLite WAL.
 - [x] Validação estrita de escopo, anti-SSRF e DNS Pinning.
-- [x] Scan Planner semântico com geração de propostas `scan_plan.sh`.
+- [x] Scan Planner semântico com higienização de payloads externos, filtro de cache-busters e geração de propostas `scan_plan.sh`.
 - [x] Módulos de Takeover, 403 Bypass e Matriz BOLA/IDOR.
+- [x] Interface de terminal moderna com `Rich` (banners, tabelas de ferramentas e sumário colorido) e instalador automático de toolchain.
 - [ ] Mapeamento automático de rotas via Websockets.
 - [ ] Exportação de relatórios prontos em formato Markdown/PDF para envio direto ao HackerOne/Bugcrowd.
 - [ ] Geração automática de templates Nuclei personalizados a partir dos schemas OpenAPI descobertos.

@@ -29,14 +29,161 @@ import sqlite3
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import time
 from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlsplit, urlunsplit
 import xml.etree.ElementTree as ET
 
 import httpx
 
+try:
+    from rich import box as _rich_box
+    from rich.console import Console
+    from rich.logging import RichHandler
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    _RICH = True
+    CONSOLE = Console(highlight=False)
+except ImportError:  # rich is optional; fall back to plain logging
+    _RICH = False
+    CONSOLE = None
+
 LOG = logging.getLogger("reconforge")
 PUBLIC_HEADERS = {"user-agent", "x-bug-bounty", "contact"}
+VERSION = "2.0"
+
+# Monokai-ish palette reused across banner / tables / panels.
+C_ACCENT = "bright_cyan"
+C_OK = "bright_green"
+C_WARN = "yellow"
+C_HOT = "bright_magenta"
+
+
+def setup_logging(level: int = logging.INFO) -> None:
+    """Rich-colored logs on a TTY; plain, greppable text otherwise (files/pipes)."""
+    if _RICH:
+        handler = RichHandler(
+            console=CONSOLE,
+            show_path=False,
+            markup=False,
+            rich_tracebacks=True,
+            log_time_format="%H:%M:%S",
+            omit_repeated_times=False,
+        )
+        logging.basicConfig(level=level, format="%(message)s", datefmt="%H:%M:%S", handlers=[handler], force=True)
+    else:
+        logging.basicConfig(level=level, format="%(asctime)s [%(levelname)s] %(message)s", force=True)
+
+
+def _active_features(a) -> list[str]:
+    feats = []
+    for flag, label in (
+        ("ct", "CT"), ("subfinder", "subfinder"), ("amass", "amass"), ("gau", "gau"),
+        ("katana", "katana"), ("browser", "browser"), ("fuzz", "fuzz"), ("ffuf", "ffuf"),
+        ("takeover", "takeover"), ("bypass_403", "403-bypass"), ("gitleaks", "gitleaks"),
+        ("trufflehog", "trufflehog"), ("auto_scan", "auto-scan"),
+    ):
+        if getattr(a, flag, False):
+            feats.append(label)
+    if getattr(a, "identity", None):
+        feats.append("BOLA")
+    if getattr(a, "scanners", None):
+        feats.append("scanners:" + "+".join(a.scanners))
+    return feats
+
+
+def print_banner(a) -> None:
+    if not _RICH:
+        LOG.info("ReconForge v%s | target=%s | scope=%s | profile=%s",
+                 VERSION, a.domain, "subdomains" if a.subdomains else "apex", a.scan_profile)
+        return
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold " + C_ACCENT, justify="right")
+    grid.add_column()
+    grid.add_row("target", f"[bold]{a.domain}[/bold]")
+    grid.add_row("scope", "apex + subdomains" if a.subdomains else "apex only")
+    grid.add_row("profile", f"{a.scan_profile}  ·  rate {a.rate}/s  ·  conc {a.concurrency}")
+    grid.add_row("budget", f"{a.max_probes} probes / {a.max_requests} requests")
+    feats = _active_features(a)
+    if feats:
+        grid.add_row("modules", "  ".join(feats))
+    title = Text.assemble(("ReconForge ", "bold " + C_ACCENT), (f"v{VERSION}", "dim"))
+    CONSOLE.print(Panel(grid, title=title, subtitle="[dim]authorized recon only[/dim]",
+                        border_style=C_ACCENT, box=_rich_box.ROUNDED, padding=(1, 2)))
+
+
+def print_summary(summary: dict, out_dir: Path) -> None:
+    """Pretty recon summary + highlighted findings on a TTY; JSON log otherwise."""
+    if not _RICH:
+        LOG.info("summary: %s", json.dumps(summary, ensure_ascii=False))
+        return
+
+    disc = Table.grid(padding=(0, 3))
+    disc.add_column(style="bold " + C_ACCENT, justify="right")
+    disc.add_column(justify="left")
+    disc.add_row("subdomains", str(summary["subdomains_in_scope"]))
+    disc.add_row("urls in scope", str(summary["urls_in_scope"]))
+    disc.add_row("alive", f"[{C_OK}]{summary['alive_urls']}[/{C_OK}]")
+    disc.add_row("probed", f"{summary['http_probes_run']}  ([dim]{summary['pending_urls']} pending[/dim])")
+    disc.add_row("requests", str(summary["http_requests_builtin"]))
+    disc.add_row("manual-review", str(summary["manual_review_only"]))
+
+    # Findings — color by whether anything landed.
+    findings = [
+        ("subdomain takeover", summary["takeover_candidates"]),
+        ("403/401 bypass", summary["bypass_403_candidates"]),
+        ("BOLA / IDOR", summary["bola_candidates"]),
+        ("JS secret indicators", summary["secret_indicators_unverified"]),
+        ("scan-plan endpoints", summary["scan_plan_endpoints"]),
+    ]
+    ftab = Table(box=_rich_box.SIMPLE_HEAD, show_edge=False, pad_edge=False)
+    ftab.add_column("finding", style="bold")
+    ftab.add_column("count", justify="right")
+    for label, n in findings:
+        hit = n and label != "scan-plan endpoints"
+        style = C_HOT if hit else (C_OK if (n and label == "scan-plan endpoints") else "dim")
+        ftab.add_row(label, f"[{style}]{n}[/{style}]")
+
+    cols = Table.grid(padding=(0, 4))
+    cols.add_column(); cols.add_column()
+    cols.add_row(
+        Panel(disc, title="[bold]discovery[/bold]", border_style=C_ACCENT, box=_rich_box.ROUNDED),
+        Panel(ftab, title="[bold]findings[/bold]", border_style=C_HOT, box=_rich_box.ROUNDED),
+    )
+    CONSOLE.print(cols)
+
+    hot = summary["takeover_candidates"] + summary["bypass_403_candidates"] + summary["bola_candidates"]
+    if hot:
+        CONSOLE.print(Panel(
+            f"[{C_HOT}]{hot} candidate(s) need manual verification[/{C_HOT}] — "
+            f"see takeover/bypass403/bola jsonl in [bold]{out_dir}[/bold]",
+            border_style=C_HOT, box=_rich_box.HEAVY))
+    CONSOLE.print(f"[dim]output:[/dim] [bold]{out_dir}[/bold]   [dim]candidates are unconfirmed — verify manually[/dim]")
+
+
+def print_tools_table(report: dict[str, dict]) -> None:
+    """Render tool installation status as a Rich table when available, else log lines."""
+    if not _RICH:
+        for name, info in report.items():
+            status = f"OK ({info['path']})" if info["installed"] else f"MISSING (install via {info['installer']}: {info['spec']})"
+            LOG.info("tool %-12s : %s", name, status)
+        return
+    tab = Table(title="[bold " + C_ACCENT + "]ReconForge Toolchain Status[/bold " + C_ACCENT + "]",
+                box=_rich_box.ROUNDED, border_style=C_ACCENT)
+    tab.add_column("Tool / Package", style="bold")
+    tab.add_column("Kind", style="dim")
+    tab.add_column("Status")
+    tab.add_column("Location / Installer Spec")
+    for name, info in report.items():
+        if info["installed"]:
+            st = f"[{C_OK}]INSTALLED[/{C_OK}]"
+            loc = str(info["path"])
+        else:
+            st = f"[{C_WARN}]MISSING[/{C_WARN}]"
+            loc = f"[dim]{info['installer']}: {info['spec']}[/dim]"
+        tab.add_row(name, info["kind"], st, loc)
+    CONSOLE.print(tab)
 
 
 def parse_headers(specs) -> dict[str, str]:
@@ -359,7 +506,7 @@ EXTERNAL_TOOLS: dict[str, tuple[str, str]] = {
     "nuclei": ("go", "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"),
     "dalfox": ("go", "github.com/hahwul/dalfox/v2@latest"),
     "gitleaks": ("go", "github.com/zricethezav/gitleaks/v8@latest"),
-    "trufflehog": ("go", "github.com/trufflesecurity/trufflehog/v3@latest"),
+    "trufflehog": ("git-go", "https://github.com/trufflesecurity/trufflehog.git"),
     "sqlmap": ("pip", "sqlmap"),
     "ghauri": ("pip", "git+https://github.com/r0oth3x49/ghauri.git"),
     "commix": ("pip", "git+https://github.com/commixproject/commix.git"),
@@ -368,6 +515,7 @@ EXTERNAL_TOOLS: dict[str, tuple[str, str]] = {
 PYTHON_PACKAGES: dict[str, tuple[str, str]] = {
     "dnspython": ("dns", "dnspython>=2.4.0"),
     "playwright": ("playwright", "playwright>=1.48.0"),
+    "rich": ("rich", "rich>=13.7.0"),
 }
 
 
@@ -476,6 +624,34 @@ def install_missing_tool(name: str, timeout: int = 300) -> bool:
             )
         except (OSError, subprocess.SubprocessError) as exc:
             LOG.warning("failed to install %s via go: %s", name, exc)
+            return False
+    elif installer == "git-go":
+        go_bin = shutil.which("go")
+        git_bin = shutil.which("git")
+        if not go_bin or not git_bin:
+            LOG.warning("cannot auto-install %s: 'go' and 'git' are required in PATH", name)
+            return False
+        LOG.info("installing missing tool %s from source (%s)...", name, spec)
+        try:
+            env = os.environ.copy()
+            env.setdefault("CGO_ENABLED", "0")
+            with tempfile.TemporaryDirectory() as tmpdir:
+                subprocess.run(
+                    [git_bin, "clone", "--depth", "1", spec, tmpdir],
+                    check=True,
+                    timeout=timeout,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                subprocess.run(
+                    [go_bin, "install", "."],
+                    cwd=tmpdir,
+                    check=True,
+                    timeout=timeout,
+                    env=env,
+                )
+        except (OSError, subprocess.SubprocessError) as exc:
+            LOG.warning("failed to build %s from source: %s", name, exc)
             return False
     elif installer == "pip":
         LOG.info("installing missing tool %s via pip (%s)...", name, spec)
@@ -1902,7 +2078,10 @@ class Recon:
             "note": "Candidates are not confirmed vulnerabilities; tool findings require manual verification.",
         }
         atomic_text(self.out / "summary.json", json.dumps(summary, indent=2, ensure_ascii=False))
-        LOG.info("summary: %s", json.dumps(summary, ensure_ascii=False))
+        if _RICH and CONSOLE.is_terminal:
+            print_summary(summary, self.out)
+        else:
+            LOG.info("summary: %s", json.dumps(summary, ensure_ascii=False))
 
     def _scan_argv(self, tool: str, url: str, scan_dir: Path, idx: int = 0) -> list[str]:
         """Single source of truth for per-URL scanner invocations — shared by the
@@ -2264,13 +2443,11 @@ def build_parser():
 
 def main():
     a = build_parser().parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    setup_logging()
     ensure_tool_paths()
     if a.check_tools:
         report = check_system_tools()
-        for name, info in report.items():
-            status = f"OK ({info['path']})" if info["installed"] else f"MISSING (install via {info['installer']}: {info['spec']})"
-            LOG.info("tool %-12s : %s", name, status)
+        print_tools_table(report)
         if not a.domain and not a.install_tools:
             return
     if a.install_tools:
@@ -2327,6 +2504,7 @@ def main():
             raise SystemExit(f"--identity must be 'LABEL:Header: Value' (got {spec!r})")
         if label.strip().lower() == "anon":
             raise SystemExit("--identity label 'anon' is reserved")
+    print_banner(a)
     asyncio.run(Recon(a).run())
 
 
