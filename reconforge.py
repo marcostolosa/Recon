@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import defaultdict
 import csv
 import hashlib
 from html.parser import HTMLParser
@@ -18,6 +19,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import sqlite3
@@ -112,6 +114,80 @@ BYPASS_HEADERS = [
     {"X-Forwarded-Server": "127.0.0.1"},
 ]
 BYPASS_PATH_SUFFIXES = ["/", "/.", "//", "/./", "/%2e/", "/%20", "/..;/", ";/", "/~", "?"]
+
+# Intelligent scanner routing: a query-parameter NAME (exact, case-insensitive)
+# routes the URL to the tools worth running against it. Overlap is intentional —
+# one URL may suggest several tools. These are proposals for review, not verdicts.
+INJECTION_ROUTES = {
+    "sqli": (
+        re.compile(
+            r"id|uid|user|userid|user_id|account|acc|order|orderid|order_id|pid|product|prod|cat|category|"
+            r"item|num|no|page|offset|limit|start|sort|order_by|orderby|group|column|field|filter|where|"
+            r"table|select|record|row|rows|index",
+            re.I,
+        ),
+        ("sqlmap", "ghauri"),
+    ),
+    "cmdi": (
+        re.compile(
+            r"cmd|exec|execute|command|run|ping|host|ip|addr|dns|lookup|shell|system|code|func|proc|"
+            r"daemon|action|do|op|operation",
+            re.I,
+        ),
+        ("commix",),
+    ),
+    "xss": (
+        re.compile(
+            r"q|s|search|query|keyword|kw|name|message|msg|comment|text|body|title|subject|lang|locale|"
+            r"callback|cb|jsonp|input|value|val|data|content|desc|description|email|ref",
+            re.I,
+        ),
+        ("dalfox",),
+    ),
+    "ssrf_redirect": (
+        re.compile(
+            r"url|uri|dest|destination|redirect|redir|redirect_uri|return|returnurl|return_url|next|target|"
+            r"rurl|continue|link|out|load|fetch|site|domain|server|feed|to|image|img|avatar|file_url|"
+            r"webhook|proxy|forward|src|source|open|window|callback_url",
+            re.I,
+        ),
+        ("nuclei-ssrf", "manual"),
+    ),
+    "lfi_path": (
+        re.compile(
+            r"file|filename|filepath|path|folder|dir|directory|include|inc|require|doc|document|page|pg|"
+            r"template|tpl|load|read|download|dl|view|show|display|resource|module",
+            re.I,
+        ),
+        ("nuclei-lfi", "manual"),
+    ),
+}
+# Tools the auto-scan path may actually execute (nuclei stays review-gated on templates/tags).
+EXECUTABLE_SCAN_TOOLS = {"sqlmap", "ghauri", "commix", "dalfox"}
+
+# Scan depth profiles. Depth (coverage) is tuned here; speed is a separate axis
+# controlled by --rate / --concurrency. In authorized scope prefer "fast" (high
+# thread count + moderate depth) or "deep" (max coverage). "safe" stays gentle.
+SCAN_PROFILES = {
+    "safe": {
+        "sqlmap": {"level": 1, "risk": 1, "threads": 1, "random_agent": False},
+        "ghauri": {"level": 1, "threads": 1},
+        "commix": {"level": 1},
+        "dalfox": {"worker": 1, "mining": False, "deep_domxss": False},
+    },
+    "fast": {
+        "sqlmap": {"level": 3, "risk": 2, "threads": 10, "random_agent": True},
+        "ghauri": {"level": 2, "threads": 10},
+        "commix": {"level": 2},
+        "dalfox": {"worker": 40, "mining": True, "deep_domxss": False},
+    },
+    "deep": {
+        "sqlmap": {"level": 5, "risk": 3, "threads": 10, "random_agent": True},
+        "ghauri": {"level": 3, "threads": 10},
+        "commix": {"level": 3},
+        "dalfox": {"worker": 50, "mining": True, "deep_domxss": True},
+    },
+}
 
 
 def hostnorm(host: str) -> str:
@@ -1264,11 +1340,55 @@ class Recon:
             "takeover_candidates": len(self.takeover_hits),
             "bypass_403_candidates": len(self.bypass_hits),
             "bola_candidates": len(self.bola_findings),
+            "scan_plan_endpoints": self.store.conn.execute(
+                "SELECT COUNT(*) FROM urls WHERE checked=1 AND status BETWEEN 200 AND 399 AND instr(url,'?')>0"
+            ).fetchone()[0],
+            "scan_profile": self.a.scan_profile,
+            "auto_scan": bool(self.a.auto_scan),
             "external_requests_not_in_builtin_budget": True,
             "note": "Candidates are not confirmed vulnerabilities; tool findings require manual verification.",
         }
         (self.out / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf8")
         LOG.info("summary: %s", json.dumps(summary, ensure_ascii=False))
+
+    def _scan_argv(self, tool: str, url: str, scan_dir: Path, idx: int = 0) -> list[str]:
+        """Single source of truth for per-URL scanner invocations — shared by the
+        manual --scanners path, the generated scan_plan.sh, and --auto-scan. Depth
+        comes from the --scan-profile; speed from --rate (delay) and thread count."""
+        delay = round(1.0 / self.a.rate, 3)
+        t = self.a.timeout
+        prof = SCAN_PROFILES[self.a.scan_profile][tool]
+        if tool == "sqlmap":
+            argv = ["sqlmap", "-u", url, "--batch", f"--level={prof['level']}", f"--risk={prof['risk']}",
+                    f"--threads={prof['threads']}", "--retries=0", f"--timeout={t}", f"--delay={delay}",
+                    "--disable-coloring", f"--output-dir={scan_dir / 'sqlmap'}"]
+            if prof["random_agent"]:
+                argv.append("--random-agent")
+            return argv
+        if tool == "ghauri":
+            return ["ghauri", "-u", url, "--batch", "--level", str(prof["level"]), "--confirm",
+                    "--threads", str(prof["threads"]), "--timeout", str(t), "--delay", str(delay)]
+        if tool == "commix":
+            return ["commix", "--batch", "-u", url, "--level", str(prof["level"]), f"--timeout={t}", "--delay", str(delay)]
+        if tool == "dalfox":
+            argv = ["dalfox", "url", url, "--worker", str(prof["worker"]), "--delay", str(int(delay * 1000)),
+                    "--timeout", str(t), "--format", "jsonl", "--output", str(scan_dir / f"dalfox_{idx}.jsonl"),
+                    "--include-url", self.scope.regex()]
+            if not prof["mining"]:
+                argv += ["--skip-mining-all", "--only-poc"]
+            if prof["deep_domxss"]:
+                argv.append("--deep-domxss")
+            return argv
+        raise ValueError(tool)
+
+    def _nuclei_argv(self, input_file: Path) -> list[str]:
+        cmd = ["nuclei", "-l", str(input_file), "-rl", str(max(1, int(self.a.rate))), "-c", "1",
+               "-timeout", str(self.a.timeout), "-retries", "0", "-ni", "-no-color", "-jsonl", "-or"]
+        if self.a.nuclei_tags:
+            cmd.extend(["-tags", self.a.nuclei_tags])
+        if self.a.nuclei_templates:
+            cmd.extend(["-t", self.a.nuclei_templates])
+        return cmd
 
     async def scanners(self):
         if not self.a.scanners:
@@ -1296,76 +1416,97 @@ class Recon:
                     continue
                 targets = scan_dir / "nuclei-input.txt"
                 targets.write_text("\n".join(live) + "\n", encoding="utf8")
-                cmd = [
-                    "nuclei",
-                    "-l",
-                    str(targets),
-                    "-rl",
-                    str(max(1, int(self.a.rate))),
-                    "-c",
-                    "1",
-                    "-timeout",
-                    str(self.a.timeout),
-                    "-retries",
-                    "0",
-                    "-ni",
-                    "-no-color",
-                    "-jsonl",
-                    "-or",
-                ]
-                if self.a.nuclei_tags:
-                    cmd.extend(["-tags", self.a.nuclei_tags])
-                if self.a.nuclei_templates:
-                    cmd.extend(["-t", self.a.nuclei_templates])
-                await self.command("scanner_nuclei", cmd)
-            elif tool == "dalfox":
+                await self.command("scanner_nuclei", self._nuclei_argv(targets))
+            elif tool in EXECUTABLE_SCAN_TOOLS:
                 if not params:
                     continue
-                target = scan_dir / "dalfox-input.txt"
-                target.write_text("\n".join(params) + "\n", encoding="utf8")
-                cmd = [
-                    "dalfox",
-                    "scan",
-                    str(target),
-                    "--input-type",
-                    "file",
-                    "--workers",
-                    "1",
-                    "--max-concurrent-targets",
-                    "1",
-                    "--rate-limit",
-                    str(max(1, int(self.a.rate))),
-                    "--timeout",
-                    str(self.a.timeout),
-                    "--format",
-                    "jsonl",
-                    "--insecure=false",
-                    "--output",
-                    str(scan_dir / "dalfox.jsonl"),
-                    "--include-url",
-                    self.scope.regex(),
-                ]
-                await self.command("scanner_dalfox", cmd)
-            elif tool == "sqlmap":
-                if not shutil.which("sqlmap"):
-                    LOG.warning("sqlmap missing in PATH")
+                if not shutil.which(tool):
+                    LOG.warning("%s missing in PATH; skipped", tool)
                     continue
                 for i, u in enumerate(params):
-                    cmd = [
-                        "sqlmap",
-                        "-u",
-                        u,
-                        "--batch",
-                        "--level=1",
-                        "--risk=1",
-                        "--threads=1",
-                        "--retries=0",
-                        "--timeout=" + str(self.a.timeout),
-                        "--delay=" + str(round(1 / self.a.rate, 3)),
-                        "--disable-coloring",
-                        "--output-dir=" + str(scan_dir / "sqlmap"),
-                    ]
-                    await self.command(f"scanner_sqlmap_{i}", cmd)
+                    await self.command(f"scanner_{tool}_{i}", self._scan_argv(tool, u, scan_dir, i))
+
+    def classify_url(self, url: str) -> tuple[dict[str, tuple], list[str]]:
+        names = [k for k, _ in parse_qsl(urlsplit(url).query, keep_blank_values=True)]
+        hits = {cls: tools for cls, (rx, tools) in INJECTION_ROUTES.items() if any(rx.fullmatch(n) for n in names)}
+        return hits, names
+
+    async def plan_scans(self):
+        """Classify live parameterized endpoints and propose which tool to run where.
+        Always writes a reviewable plan (JSON + shell script). With --auto-scan it also
+        launches the executable tools that are present in PATH."""
+        rows = [
+            r[0]
+            for r in self.store.conn.execute(
+                "SELECT url FROM urls WHERE checked=1 AND status BETWEEN 200 AND 399 AND instr(url,'?')>0 "
+                "AND source!='soft404_control' ORDER BY priority DESC LIMIT ?",
+                (self.a.scan_plan_limit,),
+            )
+        ]
+        allowed = set(self.a.scan_tools) if self.a.scan_tools else None
+        plan: list[dict] = []
+        tool_targets: dict[str, list[str]] = defaultdict(list)
+        for url in rows:
+            hits, names = self.classify_url(url)
+            if not hits:
+                continue
+            tools = sorted({t for tset in hits.values() for t in tset})
+            if allowed is not None:
+                tools = [t for t in tools if t in allowed or t.split("-")[0] in allowed]
+            if not tools:
+                continue
+            plan.append({"url": url, "classes": sorted(hits), "params": names, "suggested_tools": tools})
+            for t in tools:
+                if t in EXECUTABLE_SCAN_TOOLS:
+                    tool_targets[t].append(url)
+        if not plan:
+            LOG.info("scan planner: no parameterized endpoints matched a known injection class")
+            return
+        scan_dir = self.out / "scanners"
+        scan_dir.mkdir(exist_ok=True)
+        (self.out / "scan_plan.json").write_text(
+            "\n".join(json.dumps(x, ensure_ascii=False) for x in plan) + "\n", encoding="utf8"
+        )
+        self._write_scan_script(plan, tool_targets, scan_dir)
+        suggested = sorted({t for p in plan for t in p["suggested_tools"]})
+        LOG.info("scan planner: %d endpoints, tools suggested: %s", len(plan), ", ".join(suggested))
+        if self.a.auto_scan:
+            await self._run_plan(tool_targets, scan_dir)
+        else:
+            LOG.info("scan plan written (review scan_plan.sh); pass --auto-scan to execute automatically")
+
+    def _write_scan_script(self, plan, tool_targets, scan_dir: Path) -> None:
+        lines = [
+            "#!/usr/bin/env bash",
+            "# ReconForge scan plan — REVIEW BEFORE RUNNING. Authorized targets only.",
+            "# These are proposals routed from discovered parameters; adjust level/risk as the program allows.",
+            "set -u",
+            "",
+        ]
+        for tool in sorted(tool_targets):
+            lines.append(f"# === {tool} ===")
+            for i, url in enumerate(dict.fromkeys(tool_targets[tool])):
+                argv = self._scan_argv(tool, url, scan_dir, i)
+                lines.append(" ".join(shlex.quote(x) for x in argv))
+            lines.append("")
+        # Suggestions that stay manual / need template review
+        manual = [p for p in plan if any(t in ("manual", "nuclei-ssrf", "nuclei-lfi") for t in p["suggested_tools"])]
+        if manual:
+            lines.append("# === manual review (SSRF/LFI/redirect — verify by hand or with reviewed nuclei templates) ===")
+            for p in manual:
+                lines.append(f"#   {p['url']}  [{','.join(p['classes'])}]  params={','.join(p['params'])}")
+        (self.out / "scan_plan.sh").write_text("\n".join(lines) + "\n", encoding="utf8")
+
+    async def _run_plan(self, tool_targets, scan_dir: Path) -> None:
+        for tool in sorted(tool_targets):
+            if tool not in EXECUTABLE_SCAN_TOOLS:
+                continue
+            if not shutil.which(tool):
+                LOG.warning("auto-scan: %s not in PATH; skipped (%d targets)", tool, len(set(tool_targets[tool])))
+                continue
+            for i, url in enumerate(dict.fromkeys(tool_targets[tool])):
+                LOG.info("auto-scan %s -> %s", tool, url)
+                await self.command(f"autoscan_{tool}_{i}", self._scan_argv(tool, url, scan_dir, i))
 
     async def offline_secrets(self):
         if not any((self.a.gitleaks, self.a.trufflehog)) or not any(self.js_dir.glob("*.js")):
@@ -1423,6 +1564,7 @@ class Recon:
             await self.bola()
             await self.offline_secrets()
             await self.scanners()
+            await self.plan_scans()
         finally:
             self.export()
             await self.client.aclose()
@@ -1476,7 +1618,7 @@ def build_parser():
     p.add_argument("--max-ffuf-hosts", type=int, default=10)
     p.add_argument("--wordlist")
     p.add_argument("--max-fuzz-words", type=int, default=500)
-    p.add_argument("--scanners", nargs="+", choices=["nuclei", "dalfox", "sqlmap"])
+    p.add_argument("--scanners", nargs="+", choices=["nuclei", "dalfox", "sqlmap", "ghauri", "commix"])
     p.add_argument("--gitleaks", action="store_true", help="scan downloaded JavaScript files offline")
     p.add_argument("--trufflehog", action="store_true", help="scan downloaded JavaScript files offline without API verification")
     p.add_argument("--scan-limit", type=int, default=30)
@@ -1493,6 +1635,20 @@ def build_parser():
         help="test identity for BOLA/IDOR authz matrix, 'LABEL:Header: Value' (repeat to add headers); use only accounts you control and the program authorizes",
     )
     p.add_argument("--authz-limit", type=int, default=50, help="max endpoints replayed per identity in the authz matrix")
+    p.add_argument(
+        "--scan-tools",
+        nargs="+",
+        choices=["sqlmap", "ghauri", "commix", "dalfox", "nuclei"],
+        help="restrict which tools the scan planner proposes (default: all routed tools)",
+    )
+    p.add_argument("--auto-scan", action="store_true", help="execute the routed scan plan (sqlmap/ghauri/commix/dalfox in PATH); default is propose-only")
+    p.add_argument("--scan-plan-limit", type=int, default=50, help="max parameterized endpoints to route in the scan plan")
+    p.add_argument(
+        "--scan-profile",
+        choices=["safe", "fast", "deep"],
+        default="fast",
+        help="scanner depth: safe (gentle), fast (default, high threads + moderate depth), deep (max coverage). Speed is set separately via --rate/--concurrency.",
+    )
     return p
 
 
@@ -1515,6 +1671,7 @@ def main():
         and a.scan_limit >= 1
         and a.bypass_limit >= 1
         and a.authz_limit >= 1
+        and a.scan_plan_limit >= 1
         and a.crawl_depth in range(1, 8)
         and a.timeout >= 1
         and a.tool_timeout >= 1

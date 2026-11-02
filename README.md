@@ -108,10 +108,30 @@ python reconforge.py example.com --subdomains \
 Dispara testes focados em endpoints previamente validados e filtrados:
 ```bash
 python reconforge.py example.com --subdomains \
-  --scanners nuclei dalfox \
+  --scanners nuclei dalfox ghauri commix \
   --nuclei-tags exposure,misconfig \
   --scan-limit 25 \
   --out runs/example-scanners
+```
+
+### 4b. Roteamento Inteligente de Scanners (Scan Planner)
+
+Ao fim do recon, a pipeline **classifica cada parâmetro vivo** e decide qual ferramenta faz sentido em qual alvo — SQLi→`sqlmap`/`ghauri`, Command Injection→`commix`, XSS→`dalfox`, SSRF/redirect e LFI→`nuclei`/revisão manual. Por padrão só **propõe** (gera `scan_plan.json` + `scan_plan.sh` prontos pra revisar e rodar). Com `--auto-scan`, **executa** as ferramentas roteadas presentes no PATH.
+
+Dois eixos independentes:
+- **Profundidade** via `--scan-profile {safe,fast,deep}` (default `fast`). `fast` = alto paralelismo + profundidade média + `--random-agent` + mining do dalfox; `deep` = cobertura máxima (sqlmap `--level 5 --risk 3`, dalfox `--deep-domxss`).
+- **Velocidade** via `--rate` / `--concurrency` (suba à vontade em escopo autorizado).
+
+```bash
+# Só propor (seguro) — revise runs/example/scan_plan.sh antes de rodar
+python reconforge.py example.com --subdomains --out runs/example
+
+# Iniciar automaticamente, cobertura máxima e rápido (escopo autorizado)
+python reconforge.py example.com --subdomains \
+  --auto-scan --scan-profile deep \
+  --rate 20 --concurrency 15 \
+  --scan-plan-limit 100 \
+  --out runs/example
 ```
 
 ### 5. Retomada de Sessão (Resume)
@@ -164,6 +184,7 @@ Todas as evidências são estruturadas no diretório de saída:
 - `takeover_candidates.jsonl`: Subdomínios com assinatura de serviço de terceiros não reivindicado (candidatos a takeover).
 - `bypass403_candidates.jsonl`: Endpoints 401/403 que cederam a alguma técnica GET-only de bypass, com a técnica usada.
 - `bola_candidates.jsonl` / `authz_matrix.csv`: Candidatos a BOLA/IDOR e a matriz bruta de resposta por identidade (`anon`/A/B) para verificação manual.
+- `scan_plan.json` / `scan_plan.sh`: Plano de scanners roteado por classe de vulnerabilidade (SQLi/XSS/CMDi/SSRF/LFI) — comandos prontos para revisar ou já executados via `--auto-scan`.
 - `js/*.js`: Bundles JavaScript arquivados localmente para análise estática offline.
 - `tools/*.stdout` / `*.stderr`: Logs de execução de ferramentas externas.
 

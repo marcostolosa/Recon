@@ -227,6 +227,36 @@ class TestReconForge(unittest.TestCase):
             args.max_body = max(1, min(args.max_body, 20_000_000))
             self.assertEqual(args.max_body, 20_000_000)
 
+    def test_16_classify_url_routes_injection_tools(self):
+        with tempfile.TemporaryDirectory() as td:
+            recon = Recon(build_parser().parse_args(["example.com", "--out", td]))
+            hits, names = recon.classify_url("https://example.com/item?id=5&redirect=/x&q=hi")
+            self.assertIn("sqli", hits)          # id -> sqlmap/ghauri
+            self.assertIn("ssrf_redirect", hits)  # redirect -> nuclei-ssrf/manual
+            self.assertIn("xss", hits)            # q -> dalfox
+            self.assertIn("sqlmap", hits["sqli"])
+            self.assertIn("dalfox", hits["xss"])
+            # a boring param routes to nothing
+            empty, _ = recon.classify_url("https://example.com/x?totally_random_param=1")
+            self.assertEqual(empty, {})
+            recon.store.conn.close()
+
+    def test_17_scan_profile_depth(self):
+        with tempfile.TemporaryDirectory() as td:
+            scan_dir = Path(td) / "scanners"
+            scan_dir.mkdir()
+            deep = Recon(build_parser().parse_args(["example.com", "--out", td, "--scan-profile", "deep"]))
+            argv = deep._scan_argv("sqlmap", "https://example.com/a?id=1", scan_dir)
+            self.assertIn("--level=5", argv)
+            self.assertIn("--risk=3", argv)
+            self.assertIn("--random-agent", argv)
+            deep.store.conn.close()
+            safe = Recon(build_parser().parse_args(["example.com", "--out", td, "--scan-profile", "safe"]))
+            argv = safe._scan_argv("sqlmap", "https://example.com/a?id=1", scan_dir)
+            self.assertIn("--level=1", argv)
+            self.assertNotIn("--random-agent", argv)
+            safe.store.conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
