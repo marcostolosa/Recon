@@ -131,6 +131,19 @@ def ui_event(tag: str, message: str, style: str = C_ACCENT) -> None:
         CONSOLE.print(f"  [bold {style}][{tag:>10}][/bold {style}] {message}")
 
 
+def ui_scan_line(tag: str, text: str) -> None:
+    """Stream one raw line of a scanner's native output, tagged so parallel tools stay
+    legible. Content is appended literally (no markup parsing) to stay injection-safe."""
+    if _RICH and CONSOLE.is_terminal:
+        line = Text()
+        line.append(f"{tag} ", style="bold " + C_ACCENT)
+        line.append("│ ", style="dim")
+        line.append(text)
+        CONSOLE.print(line, highlight=False, soft_wrap=True)
+    else:
+        print(f"{tag} | {text}", flush=True)
+
+
 def print_banner(a) -> None:
     if not _RICH:
         LOG.info("ReconForge v%s | target=%s | scope=%s | profile=%s",
@@ -839,6 +852,24 @@ INJECTION_ROUTES = {
 }
 # Tools the auto-scan path may actually execute (nuclei stays review-gated on templates/tags).
 EXECUTABLE_SCAN_TOOLS = {"sqlmap", "ghauri", "commix", "dalfox"}
+# Default arsenal fired at EVERY candidate injection point — one active tester per
+# distinct vuln class (SQLi / XSS / CommandInjection). A param name is a hint, not a
+# limit: an `id=` param can still be XSS or command-injectable, so all three run.
+# ghauri is a sqlmap alternative (same SQLi job) and is opt-in via --scan-tools to
+# avoid running two SQLi engines on the same parameter.
+DEFAULT_ARSENAL = ("sqlmap", "dalfox", "commix")
+
+# Volume caps prune how MUCH gets tested; in bug bounty that prunes exactly the
+# obscure subdomain/URL where the bug hides. These are liftable: --unlimited (or
+# passing 0 to any one) sets it to effectively infinite. The real throttle that
+# keeps you un-banned is --rate / --concurrency, never a hard stop mid-recon.
+INF_CAP = 10**12
+VOLUME_CAPS = (
+    "max_hosts", "max_probes", "max_requests", "max_urls", "max_crawl_hosts",
+    "max_ffuf_hosts", "max_fuzz_hosts", "max_dns_words", "max_import_lines",
+    "max_pages", "max_fuzz_words", "scan_plan_limit", "scan_limit",
+    "bypass_limit", "authz_limit",
+)
 
 # Cache-busting / versioning params carry no injectable value. A URL whose params
 # are ALL in this set must not win probe priority or feed the scan planner, so
@@ -1639,6 +1670,57 @@ class Recon:
             return await asyncio.to_thread(install_missing_tool, tool_name, self.a.tool_timeout)
         return False
 
+    async def stream_command(self, name: str, argv: list[str], tag: str, timeout: int | None = None) -> Path | None:
+        """Like command() but streams the tool's native stdout line-by-line to the
+        console in real time (tagged for parallel legibility) while still saving the
+        full raw output to the run directory."""
+        if not await self.ensure_tool(argv[0]):
+            LOG.warning("%s missing in PATH; skipped", argv[0])
+            return None
+        path = self.tool_dir / f"{name}.stdout"
+        started = time.monotonic()
+        code = None
+        details = ""
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *tool_process_argv(argv),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                **({"start_new_session": True} if os.name == "posix" else {}),
+            )
+            self.active_procs.add(proc)
+
+            async def pump():
+                with path.open("wb") as fh:
+                    while True:
+                        line = await proc.stdout.readline()
+                        if not line:
+                            break
+                        fh.write(line)
+                        text = line.decode("utf8", "replace").rstrip("\r\n")
+                        if text.strip():
+                            ui_scan_line(tag, self.redact(text))
+
+            try:
+                await asyncio.wait_for(asyncio.gather(pump(), proc.wait()), timeout=timeout or self.a.tool_timeout)
+                code = proc.returncode
+            except asyncio.TimeoutError:
+                await self.stop_process(proc)
+                details = "timeout"
+        except OSError as exc:
+            details = str(exc)
+            LOG.warning("tool %s: %s", name, exc)
+        except asyncio.CancelledError:
+            if proc is not None:
+                await self.stop_process(proc)
+            raise
+        finally:
+            if proc is not None:
+                self.active_procs.discard(proc)
+        self.store.tool(name, [self.redact(v) for v in argv], code, time.monotonic() - started, self.redact(details))
+        return path if path.exists() else None
+
     async def command(self, name: str, argv: list[str], timeout: int | None = None) -> Path | None:
         if not await self.ensure_tool(argv[0]):
             LOG.warning("%s missing in PATH; skipped", argv[0])
@@ -1651,7 +1733,8 @@ class Recon:
         proc = None
         try:
             with path.open("wb") as stdout, errpath.open("wb") as stderr:
-                proc = await asyncio.create_subprocess_exec(*tool_process_argv(argv), stdout=stdout, stderr=stderr,
+                proc = await asyncio.create_subprocess_exec(*tool_process_argv(argv),
+                    stdin=asyncio.subprocess.DEVNULL, stdout=stdout, stderr=stderr,
                     **({"start_new_session": True} if os.name == "posix" else {}))
                 self.active_procs.add(proc)
                 try:
@@ -2837,8 +2920,10 @@ class Recon:
                     "--threads", str(threads), "--timeout", str(t), "--delay", str(integer_delay),
                     "--headers", bulk_headers]
         if tool == "commix":
+            # Drop the 'f' (file-based) technique: it writes a file to the target, which
+            # changes server state. Keep results/blind/time-based detection only.
             return ["commix", "--batch", "-u", url, "--level", str(prof["level"]), f"--timeout={t}",
-                    "--delay", str(integer_delay), "--ignore-redirects", "--headers", bulk_headers]
+                    "--delay", str(integer_delay), "--technique=rbt", "--ignore-redirects", "--headers", bulk_headers]
         if tool == "dalfox":
             argv = ["dalfox", "url", url, "--worker", str(threads), "--delay", str(int(delay * 1000)),
                     "--timeout", str(t), "--format", "jsonl", "--output", str(scan_dir / f"dalfox_{idx}.jsonl")]
@@ -2938,12 +3023,18 @@ class Recon:
             if self.permitted_url(url) is None or self.is_soft404(url) or is_versioned_asset(url):
                 continue
             hits, names = self.classify_url(url)
-            if not hits:
+            # Every live parameterized endpoint is an injection candidate. A matching
+            # param NAME (hits) is a prioritization hint, NOT a gate — real injectable
+            # params often have odd names. Only skip endpoints whose params are ALL
+            # cache-busters (no real input surface).
+            if not names or is_cache_buster(names):
                 continue
-            tools = sorted({t for tset in hits.values() for t in tset})
-            if allowed is not None:
-                tools = [t for t in tools if t in allowed or t.split("-")[0] in allowed]
-            if not tools:
+            # Arsenal = full set of distinct-class injectors fired at this candidate,
+            # not just the one its param name hinted. Honour --scan-tools if given.
+            arsenal = [t for t in DEFAULT_ARSENAL if (allowed is None or t in allowed)]
+            if allowed is not None and "ghauri" in allowed:
+                arsenal.append("ghauri")
+            if not arsenal:
                 continue
             # Strip other researchers' payloads from the values, then collapse the
             # many variants of one endpoint (id=0, id=1, id=0+and+1=1--) into a single
@@ -2954,8 +3045,8 @@ class Recon:
             if key in seen:
                 continue
             seen.add(key)
-            plan.append({"url": target, "classes": sorted(hits), "params": names, "suggested_tools": tools})
-            for t in tools:
+            plan.append({"url": target, "classes": sorted(hits), "params": names, "suggested_tools": arsenal})
+            for t in arsenal:
                 if t in EXECUTABLE_SCAN_TOOLS:
                     tool_targets[t].append(target)
         self.scan_plan_count = len(plan)
@@ -2996,7 +3087,7 @@ class Recon:
                     lines.append(command)
             lines.append("")
         # Suggestions that stay manual / need template review
-        manual = [p for p in plan if any(t in ("manual", "nuclei-ssrf", "nuclei-lfi") for t in p["suggested_tools"])]
+        manual = [p for p in plan if any(c in ("ssrf_redirect", "lfi_path") for c in p.get("classes", []))]
         if manual:
             lines.append("# === manual review (SSRF/LFI/redirect — verify by hand or with reviewed nuclei templates) ===")
             for p in manual:
@@ -3008,20 +3099,39 @@ class Recon:
         if self.a.exclude or self.a.exclude_path:
             LOG.warning("auto-scan skipped: external tools cannot guarantee configured exclusions")
             return
+        # Build the full job list (tool, url) across the arsenal, then run them
+        # concurrently with a bounded semaphore so sqlmap/dalfox/commix hit different
+        # params in parallel instead of in series.
+        jobs: list[tuple[str, str]] = []
         for tool in sorted(tool_targets):
             if tool not in EXECUTABLE_SCAN_TOOLS:
                 continue
             if not await self.ensure_tool(tool):
                 LOG.warning("auto-scan: %s not in PATH; skipped (%d targets)", tool, len(set(tool_targets[tool])))
                 continue
-            for i, url in enumerate(dict.fromkeys(tool_targets[tool])):
+            for url in dict.fromkeys(tool_targets[tool]):
+                jobs.append((tool, url))
+        if not jobs:
+            return
+        LOG.info("auto-scan: %d scanner jobs across %d tools, concurrency %d",
+                 len(jobs), len({t for t, _ in jobs}), self.a.scan_concurrency)
+        sem = asyncio.Semaphore(self.a.scan_concurrency)
+        counters: dict[str, int] = defaultdict(int)
+
+        async def run_job(tool: str, url: str) -> None:
+            async with sem:
                 if self.permitted_url(url) is None or not await self.resolves(urlsplit(url).hostname):
-                    continue
+                    return
                 if tool == "ghauri" and any(k not in PUBLIC_HEADERS for k in self.headers_for(url)):
                     LOG.warning("ghauri skipped for authenticated target: redirect policy is not guaranteed")
-                    continue
-                LOG.info("auto-scan %s -> %s", tool, url)
-                await self.command(f"autoscan_{tool}_{i}", self._scan_argv(tool, url, scan_dir, i))
+                    return
+                idx = counters[tool]
+                counters[tool] += 1
+                tag = f"{tool}→{urlsplit(url).hostname}"
+                ui_event("SCAN", f"[bold]{tool}[/bold] → {url}", C_HOT)
+                await self.stream_command(f"autoscan_{tool}_{idx}", self._scan_argv(tool, url, scan_dir, idx), tag)
+
+        await asyncio.gather(*(run_job(t, u) for t, u in jobs), return_exceptions=True)
 
     async def offline_secrets(self):
         js_files = list(self.js_dir.glob("*.js"))
@@ -3090,6 +3200,16 @@ class Recon:
         finally:
             await self.aclose()
 
+    async def _safe(self, label: str, coro) -> None:
+        """Run one pipeline phase; log and continue on any non-cancellation error so a
+        single tool/phase failure never aborts an unattended run (export still runs)."""
+        try:
+            await coro
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            raise
+        except Exception as exc:
+            LOG.warning("phase '%s' failed (continuing): %s: %s", label, type(exc).__name__, str(exc)[:160])
+
     async def _run_locked(self):
         existing = self.out / "run_config.json"
         if not existing.exists():
@@ -3101,40 +3221,48 @@ class Recon:
         try:
             self.current_phase = "Fase 1 • Descoberta Passiva & DNS"
             print_phase("Fase 1", "Descoberta Passiva & DNS Enumeration")
-            await self.passive()
+            await self._safe("passive", self.passive())
             if self.a.passive_only:
                 return
             self.current_phase = "Fase 2 • Resolução DNS & Probing Inicial"
             print_phase("Fase 2", "Resolução DNS, Pinning & Probing Inicial")
-            await self.seed_hosts()
-            await self.drain(min(self.a.max_probes, self.a.initial_probes))
+            await self._safe("seed_hosts", self.seed_hosts())
+            await self._safe("drain", self.drain(min(self.a.max_probes, self.a.initial_probes)))
             self.current_phase = "Fase 3 • Crawling, Extração JS & Renderização"
             print_phase("Fase 3", "Crawling Profundo, Extração JS & Renderização")
-            await self.crawl_katana()
+            await self._safe("crawl_katana", self.crawl_katana())
             discovery_cap = (
                 self.a.max_probes
                 if not self.a.fuzz
                 else max(self.a.initial_probes, int(self.a.max_probes * 0.7))
             )
-            await self.drain(discovery_cap)
-            await self.browser()
-            await self.drain(discovery_cap)
+            await self._safe("drain", self.drain(discovery_cap))
+            await self._safe("browser", self.browser())
+            await self._safe("drain", self.drain(discovery_cap))
             if self.a.fuzz or self.a.ffuf:
                 self.current_phase = "Fase 4 • Fuzzing & Calibração Soft-404"
                 print_phase("Fase 4", "Fuzzing Contextual & Calibração Soft-404")
-            await self.wordlist_fuzz()
-            await self.ffuf()
-            await self.drain(self.a.max_probes)
+            await self._safe("wordlist_fuzz", self.wordlist_fuzz())
+            await self._safe("ffuf", self.ffuf())
+            await self._safe("drain", self.drain(self.a.max_probes))
             self.current_phase = "Fase 5 • Verificações (Takeover, 403, BOLA, Secrets)"
-            print_phase("Fase 5", "Verificações de Segurança (Takeover, 403 Bypass, BOLA, Secrets)")
-            await self.takeover()
-            await self.bypass_403()
-            await self.bola()
-            await self.offline_secrets()
+            print_phase("Fase 5", "Verificações de Segurança (Takeover ‖ 403 Bypass ‖ BOLA ‖ Secrets)")
+            # These passes are independent (each reads the DB, hits the network under the
+            # shared throttle, writes its own findings) — run them concurrently to save
+            # wall-time. Exceptions are isolated so one failing pass can't abort the rest.
+            results = await asyncio.gather(
+                self.takeover(), self.bypass_403(), self.bola(), self.offline_secrets(),
+                return_exceptions=True,
+            )
+            for pass_name, outcome in zip(("takeover", "bypass_403", "bola", "offline_secrets"), results):
+                if isinstance(outcome, BaseException) and not isinstance(outcome, asyncio.CancelledError):
+                    LOG.warning("phase-5 pass %s failed: %s", pass_name, type(outcome).__name__)
+                elif isinstance(outcome, asyncio.CancelledError):
+                    raise outcome
             self.current_phase = "Fase 6 • Scan Planner & Scanners"
             print_phase("Fase 6", "Scan Planner & Scanners Direcionados")
-            await self.scanners()
-            await self.plan_scans()
+            await self._safe("scanners", self.scanners())
+            await self._safe("plan_scans", self.plan_scans())
         except (KeyboardInterrupt, asyncio.CancelledError):
             interrupted = True
             raise
@@ -3182,10 +3310,15 @@ def apply_full_preset(a, argv: list[str]) -> None:
         a.takeover = True
     if "--scan-profile" not in explicit:
         a.scan_profile = "deep"
-    if "--max-probes" not in explicit:
-        a.max_probes = 5000
-    if "--max-requests" not in explicit:
-        a.max_requests = 8000
+    # Turnkey: no volume caps, and actually fire the arsenal + nuclei. The operator
+    # should not need a dozen flags for a complete run — just `--full <domain>`.
+    if "--limited" not in explicit:
+        a.unlimited = True
+    a.auto_scan = True
+    if "nuclei" not in (a.scanners or []):
+        a.scanners = [*(a.scanners or []), "nuclei"]
+    if not a.nuclei_tags and not a.nuclei_templates:
+        a.nuclei_tags = "cve,exposure,misconfiguration,default-login,takeover,secret,sqli,xss,lfi,rce,ssrf"
     if "--out" not in explicit:
         a.out = str(Path("runs") / re.sub(r"[^\w.-]", "_", a.domain))
 
@@ -3276,6 +3409,9 @@ def build_parser():
     )
     p.add_argument("--auto-scan", "--scan", dest="auto_scan", action="store_true", help="execute the routed scan plan (sqlmap/ghauri/commix/dalfox in PATH); default is propose-only")
     p.add_argument("--scan-plan-limit", type=int, default=50, help="max parameterized endpoints to route in the scan plan")
+    p.add_argument("--scan-concurrency", type=int, default=3, help="how many external scanner jobs run in parallel during auto-scan")
+    p.add_argument("--unlimited", "--no-limits", dest="unlimited", action="store_true",
+                   help="remove ALL volume caps (hosts/probes/requests/urls/crawl/plan) — run until the queue drains. rate/concurrency still throttle. Intended for large authorized scopes. Passing 0 to any single cap does the same for that one.")
     p.add_argument(
         "--scan-profile",
         choices=["safe", "fast", "deep"],
@@ -3318,6 +3454,17 @@ def main():
         needed = required_tools_for_args(a)
         if needed:
             ensure_run_tools(needed, auto_install=True, timeout=a.tool_timeout)
+    # Lift volume caps: --unlimited lifts all; a per-cap 0 lifts that one. An explicit
+    # non-zero cap the operator typed always wins (even under --unlimited).
+    explicit_flags = {tok.split("=", 1)[0] for tok in sys.argv[1:] if tok.startswith("--")}
+    for name in VOLUME_CAPS:
+        flag = "--" + name.replace("_", "-")
+        value = getattr(a, name)
+        operator_set = flag in explicit_flags and value != 0
+        if operator_set:
+            continue
+        if a.unlimited or value == 0:
+            setattr(a, name, INF_CAP)
     a.initial_probes = min(a.initial_probes, a.max_probes)
     a.max_body = max(1, min(a.max_body, 20_000_000))  # hard 20MB ceiling per response
     if not (
@@ -3331,6 +3478,7 @@ def main():
         and a.bypass_limit >= 1
         and a.authz_limit >= 1
         and a.scan_plan_limit >= 1
+        and a.scan_concurrency >= 1
         and a.crawl_depth in range(1, 8)
         and a.timeout >= 1
         and a.dns_timeout >= 1

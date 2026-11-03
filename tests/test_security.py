@@ -232,10 +232,12 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
     async def test_planner_clears_stale_plan_and_counts_routed_urls(self):
         plan = Path(self.temp.name) / 'scan_plan.json'
         plan.write_text('stale')
-        self.seed('https://example.com/?boring=1')
+        # Pure cache-buster param -> no real input surface -> no candidate (stale cleared).
+        self.seed('https://example.com/?v=123')
         await self.r.plan_scans()
         self.assertEqual(plan.read_text(), '')
         self.assertEqual(self.r.scan_plan_count, 0)
+        # Any genuine parameterized endpoint is now a candidate (name is a hint, not a gate).
         self.seed('https://example.com/?id=1')
         await self.r.plan_scans()
         self.assertEqual(self.r.scan_plan_count, 1)
