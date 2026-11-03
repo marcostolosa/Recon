@@ -20,3 +20,19 @@ tools/*.stderr
 # OS
 .DS_Store
 Thumbs.db
+
+# Internal / per-session LLM working files — never commit (handoff state, agent
+# analyses, test reports, lab-only validation scripts, scratch notes)
+HANDOFF.md
+ANALISE_*.md
+ANALISE*.md
+RELATORIO_*.md
+*_RELATORIO*.md
+NOTES_*.md
+*.internal.md
+scripts/validate_lab_fixes.py
+scripts/run_practical_validation.py
+audit_reconforge_offline.py
+
+# Scratch / tool-results
+.output/
