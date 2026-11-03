@@ -196,11 +196,11 @@ def print_scan_plan(plan: list[dict]) -> None:
     CONSOLE.print(tab)
 
 
-def print_findings_details(takeovers: list[dict], bypasses: list[dict], bolas: list[dict], top_urls: list[tuple] | None = None) -> None:
+def print_findings_details(takeovers: list[dict], bypasses: list[dict], bolas: list[dict], top_urls: list[tuple] | None = None, graphqls: list[dict] | None = None) -> None:
     """Render detailed tables for any discovered security candidates and top priority URLs."""
     if not _RICH:
         return
-    if takeovers or bypasses or bolas:
+    if takeovers or bypasses or bolas or graphqls:
         ftab = Table(
             title=f"[bold {C_HOT}]Security Candidates (Manual Verification Required)[/bold {C_HOT}]",
             box=_rich_box.ROUNDED,
@@ -216,6 +216,9 @@ def print_findings_details(takeovers: list[dict], bypasses: list[dict], bolas: l
             ftab.add_row("403-BYPASS", str(b.get("url", "")), str(b.get("technique", "")), f"status={b.get('status')} bytes={b.get('bytes')}")
         for bo in bolas[:15]:
             ftab.add_row("BOLA/IDOR", str(bo.get("url", "")), str(bo.get("type", "")), str(bo.get("detail", "")))
+        for g in (graphqls or [])[:15]:
+            sample = ",".join(g.get("sample_types", [])[:4])
+            ftab.add_row("GRAPHQL", str(g.get("url", "")), f"introspection ({g.get('types_count', 0)} types)", f"types={sample}")
         CONSOLE.print(ftab)
     if top_urls:
         utab = Table(
@@ -259,6 +262,7 @@ def print_summary(summary: dict, out_dir: Path) -> None:
         ("subdomain takeover", summary["takeover_candidates"]),
         ("403/401 bypass", summary["bypass_403_candidates"]),
         ("BOLA / IDOR", summary["bola_candidates"]),
+        ("GraphQL introspection", summary.get("graphql_candidates", 0)),
         ("JS secret indicators", summary["secret_indicators_unverified"]),
         ("scan-plan endpoints", summary["scan_plan_endpoints"]),
     ]
@@ -1506,6 +1510,7 @@ class Recon:
         self.takeover_hits: list[dict] = []
         self.bypass_hits: list[dict] = []
         self.bola_findings: list[dict] = []
+        self.graphql_hits: list[dict] = []
         self.scan_plan_count = 0
         self.active_procs: set = set()
         self.origin_clients: dict[str, httpx.AsyncClient] = {}
@@ -1541,6 +1546,8 @@ class Recon:
             findings.append({"kind": "403-BYPASS", "signal": b.get("technique", ""), "target": b.get("url", "")})
         for bo in self.bola_findings:
             findings.append({"kind": "BOLA/IDOR", "signal": bo.get("type", ""), "target": bo.get("url", "")})
+        for g in self.graphql_hits:
+            findings.append({"kind": "GRAPHQL", "signal": f"{g.get('types_count', 0)} types", "target": g.get("url", "")})
         return {
             "scope": self.scope.root,
             "phase": self.current_phase,
@@ -2055,6 +2062,9 @@ class Recon:
     def extract(self, url: str, content_type: str, payload: bytes):
         ct = content_type.lower()
         path = urlsplit(url).path.lower()
+        if path.rstrip("/").endswith(("/graphql", "/gql", "/api/graphql")) and not urlsplit(url).query:
+            intro_query = "?query=%7B__schema%7Btypes%7Bname%7D%7D%7D"
+            self.put_url(urljoin(url, intro_query), "graphql_introspection", url)
         looks_html = "html" in ct or payload[:128].lstrip().lower().startswith(
             (b"<!doctype html", b"<html", b"<head", b"<body"))
         if path.endswith((".js", ".mjs", ".map")) and looks_html:
@@ -2120,19 +2130,56 @@ class Recon:
             except ET.ParseError:
                 pass
             return
-        if "json" in ct or path.endswith(".json"):
+        if "json" in ct or path.endswith(".json") or "__schema" in path or "graphql" in path:
             try:
                 data = json.loads(payload)
-                # Parse OpenAPI / Swagger endpoints
+                # Parse OpenAPI / Swagger endpoints with parameter expansion
                 if isinstance(data, dict):
                     paths = data.get("paths", {})
                     if isinstance(paths, dict) and paths:
-                        for endpoint in paths.keys():
-                            if isinstance(endpoint, str) and endpoint.startswith("/"):
-                                methods = paths[endpoint]
-                                gettable = isinstance(methods, dict) and any(k.lower() in {"get", "head"} for k in methods)
-                                self.put_url(endpoint, "openapi_path", url, probe=gettable)
-                        self.record_event("OPENAPI", f"Schema de API em [bold]{url}[/bold] -> +{len(paths)} endpoints mapeados!", C_HOT)
+                        endpoint_count = 0
+                        for endpoint, ops in paths.items():
+                            if not isinstance(endpoint, str) or not endpoint.startswith("/"):
+                                continue
+                            gettable = isinstance(ops, dict) and any(k.lower() in {"get", "head"} for k in ops)
+                            # Expand path template variables: /users/{id} -> /users/1
+                            concrete_path = re.sub(r"\{[^}]+\}", "1", endpoint)
+                            query_params = []
+                            param_sources = []
+                            if isinstance(ops, dict):
+                                if isinstance(ops.get("parameters"), list):
+                                    param_sources.extend(ops["parameters"])
+                                for method in ("get", "head"):
+                                    m_data = ops.get(method)
+                                    if isinstance(m_data, dict) and isinstance(m_data.get("parameters"), list):
+                                        param_sources.extend(m_data["parameters"])
+                            for p_def in param_sources:
+                                if isinstance(p_def, dict) and p_def.get("in") == "query" and "name" in p_def:
+                                    query_params.append(f"{p_def['name']}=1")
+                            if query_params:
+                                seen_params = set()
+                                clean_params = []
+                                for qp in query_params:
+                                    k = qp.split("=")[0]
+                                    if k not in seen_params:
+                                        seen_params.add(k)
+                                        clean_params.append(qp)
+                                concrete_path = f"{concrete_path}?{'&'.join(clean_params)}"
+                            self.put_url(concrete_path, "openapi_path", url, probe=gettable)
+                            endpoint_count += 1
+                        self.record_event("OPENAPI", f"Schema de API em [bold]{url}[/bold] -> +{endpoint_count} endpoints mapeados!", C_HOT)
+
+                    # Check for GraphQL introspection response
+                    if "data" in data and isinstance(data["data"], dict) and "__schema" in data["data"]:
+                        schema = data["data"]["__schema"]
+                        types = schema.get("types", []) if isinstance(schema, dict) else []
+                        custom_types = [t.get("name") for t in types if isinstance(t, dict) and not str(t.get("name", "")).startswith("__")]
+                        self.record_event("GRAPHQL", f"GraphQL Introspecção ATIVA em [bold]{url}[/bold] -> {len(custom_types)} tipos expostos!", "bright_red")
+                        self.add_finding("graphql", {
+                            "url": url,
+                            "types_count": len(custom_types),
+                            "sample_types": custom_types[:10],
+                        })
                 # Scan for URLs in strings
                 text = payload.decode("utf-8", "replace")
                 for match in URL_REGEX.finditer(text):
@@ -2142,7 +2189,13 @@ class Recon:
                     if not raw.startswith("//"):
                         self.put_url(raw, "json_ref", url)
             except (json.JSONDecodeError, ValueError, UnicodeError):
-                pass
+                if b'"__schema"' in payload and b'"types"' in payload:
+                    self.record_event("GRAPHQL", f"GraphQL Introspecção ATIVA em [bold]{url}[/bold] (schema detectado)", "bright_red")
+                    self.add_finding("graphql", {
+                        "url": url,
+                        "types_count": -1,
+                        "sample_types": ["schema_detected"],
+                    })
 
     async def probe(self, url: str):
         if self.permitted_url(url) is None:
@@ -2763,7 +2816,7 @@ class Recon:
                         )
 
     def add_finding(self, kind: str, evidence: dict) -> None:
-        target = {"takeover": self.takeover_hits, "bypass": self.bypass_hits, "bola": self.bola_findings}[kind]
+        target = {"takeover": self.takeover_hits, "bypass": self.bypass_hits, "bola": self.bola_findings, "graphql": self.graphql_hits}[kind]
         encoded = json.dumps(evidence, sort_keys=True, ensure_ascii=False)
         self.store.conn.execute("INSERT OR IGNORE INTO findings VALUES(?,?)", (kind, encoded))
         self.store.commit()
@@ -2780,6 +2833,7 @@ class Recon:
             ("takeover", "takeover_hits", "takeover_candidates.jsonl"),
             ("bypass", "bypass_hits", "bypass403_candidates.jsonl"),
             ("bola", "bola_findings", "bola_candidates.jsonl"),
+            ("graphql", "graphql_hits", "graphql_candidates.jsonl"),
         ):
             entries = [json.loads(r[0]) for r in self.store.conn.execute(
                 "SELECT evidence FROM findings WHERE kind=? ORDER BY evidence", (kind,))]
@@ -2868,6 +2922,7 @@ class Recon:
             "takeover_candidates": len(self.takeover_hits),
             "bypass_403_candidates": len(self.bypass_hits),
             "bola_candidates": len(self.bola_findings),
+            "graphql_candidates": len(self.graphql_hits),
             "scan_plan_endpoints": self.scan_plan_count,
             "scan_profile": self.a.scan_profile,
             "auto_scan": bool(self.a.auto_scan),
@@ -2891,7 +2946,7 @@ class Recon:
                 "WHERE status BETWEEN 200 AND 399 AND source != 'soft404_control' "
                 "ORDER BY priority DESC, url LIMIT 15"
             ).fetchall()
-            print_findings_details(self.takeover_hits, self.bypass_hits, self.bola_findings, top_urls)
+            print_findings_details(self.takeover_hits, self.bypass_hits, self.bola_findings, top_urls, self.graphql_hits)
             print_summary(summary, self.out)
         else:
             LOG.info("summary: %s", json.dumps(summary, ensure_ascii=False))

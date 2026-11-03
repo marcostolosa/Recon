@@ -262,6 +262,47 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         self.r.put_url('https://example.com/submit', 'html')
         self.assertEqual(self.r.store.pending(10), ['https://example.com/fetch'])
 
+    async def test_openapi_expands_path_templates_and_query_parameters(self):
+        payload = json.dumps({
+            'paths': {
+                '/users/{userId}': {'get': {}},
+                '/search': {
+                    'get': {
+                        'parameters': [
+                            {'name': 'q', 'in': 'query'},
+                            {'name': 'page', 'in': 'query'},
+                        ]
+                    }
+                }
+            }
+        }).encode()
+        self.r.extract('https://example.com/openapi.json', 'application/json', payload)
+        pending = self.r.store.pending(10)
+        self.assertIn('https://example.com/users/1', pending)
+        self.assertIn('https://example.com/search?q=1&page=1', pending)
+
+    async def test_graphql_detection_and_introspection_finding(self):
+        # 1. Probing /graphql queues introspection query
+        self.r.extract('https://example.com/api/graphql', 'text/html', b'ok')
+        pending = self.r.store.pending(10)
+        self.assertTrue(any('__schema' in u for u in pending))
+        # 2. Introspection response registers finding
+        intro_payload = json.dumps({
+            'data': {
+                '__schema': {
+                    'types': [
+                        {'name': '__Schema'},
+                        {'name': 'User'},
+                        {'name': 'Order'},
+                    ]
+                }
+            }
+        }).encode()
+        self.r.extract('https://example.com/graphql?query=%7B__schema%7Btypes%7Bname%7D%7D%7D', 'application/json', intro_payload)
+        self.assertEqual(len(self.r.graphql_hits), 1)
+        self.assertEqual(self.r.graphql_hits[0]['types_count'], 2)
+        self.assertIn('User', self.r.graphql_hits[0]['sample_types'])
+
     async def test_findings_survive_resume_and_export_empty_files(self):
         self.r.add_finding('bypass', {'url': 'https://example.com/a', 'status': 200})
         self.r.bypass_hits.clear()
